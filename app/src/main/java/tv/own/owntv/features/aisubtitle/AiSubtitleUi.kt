@@ -180,7 +180,9 @@ fun AiSubtitleOverlay(
                             shadow = Shadow(color = Color.Black, offset = Offset(0f, 1.5f), blurRadius = 4f),
                         ),
                     )
-                    Spacer(Modifier.height(3.dp * sizeScale))
+                    if (active.translatedText.isNotBlank()) {
+                        Spacer(Modifier.height(3.dp * sizeScale))
+                    }
                 }
                 if (active.translatedText.isNotBlank()) {
                     Text(

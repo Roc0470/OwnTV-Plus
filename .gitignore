@@ -57,3 +57,4 @@ replay_pid*.log
 
 # Local-only archive (old detailed changelogs etc.), never committed
 /archive/
+/build_out/

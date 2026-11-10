@@ -167,7 +167,7 @@ class OpenAiCompatEngine(
                 AiSubtitleCue(
                     id = cueId,
                     originalText = transcript,
-                    translatedText = "…",
+                    translatedText = "",
                     audioStartElapsedMs = chunk.startElapsedMs,
                     audioDurationMs = chunk.durationMs,
                     isPartial = true,
@@ -680,7 +680,7 @@ class RealtimeWsEngine(
                 AiSubtitleCue(
                     id = activeCueId,
                     originalText = orig,
-                    translatedText = trans.ifEmpty { "…" },
+                    translatedText = trans,
                     audioStartElapsedMs = currentSpeechStartElapsedMs,
                     audioDurationMs = 2800L,
                     isPartial = false,
@@ -702,7 +702,7 @@ class RealtimeWsEngine(
             AiSubtitleCue(
                 id = activeCueId,
                 originalText = orig,
-                translatedText = trans.ifEmpty { "…" },
+                translatedText = trans,
                 audioStartElapsedMs = currentSpeechStartElapsedMs,
                 audioDurationMs = 2800L,
                 isPartial = isPartial,
