@@ -130,9 +130,9 @@ android {
     // builds still succeed, just unsigned.
     // Third source: the standalone out-of-repo properties file, loaded above defaultConfig.
     fun signingValue(env: String, property: String): String? =
-        System.getenv(env)
-            ?: providers.gradleProperty(property).orNull
-            ?: localSigningProps.getProperty(property)
+        System.getenv(env)?.takeUnless { it.isBlank() }
+            ?: providers.gradleProperty(property).orNull?.takeUnless { it.isBlank() }
+            ?: localSigningProps.getProperty(property)?.takeUnless { it.isBlank() }
 
     val defaultKeystore = rootProject.file("keystore/owntv_dev.keystore")
     val hasDefaultKeystore = defaultKeystore.exists()
