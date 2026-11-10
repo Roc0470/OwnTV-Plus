@@ -207,9 +207,6 @@ class AiSubtitleWebServer(
                 val sep = if (wsUrl.contains("?")) "&" else "?"
                 wsUrl = "${wsUrl}${sep}device=test"
             } else {
-                if (wsId.isNotBlank() && wsUrl.contains("aliyuncs.com") && !wsUrl.contains(wsId)) {
-                    wsUrl = "wss://${wsId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
-                }
                 if (!wsUrl.contains("model=")) {
                     val sep = if (wsUrl.contains("?")) "&" else "?"
                     wsUrl = "${wsUrl}${sep}model=${model.ifBlank { "qwen3.8-livetranslate-flash-realtime" }}"
@@ -219,6 +216,9 @@ class AiSubtitleWebServer(
             val reqBuilder = Request.Builder().url(wsUrl)
             if (key.isNotBlank()) {
                 reqBuilder.header("Authorization", "Bearer $key")
+            }
+            if (wsId.isNotBlank()) {
+                reqBuilder.header("X-DashScope-WorkSpace", wsId.trim())
             }
             if (provider == AiSubtitleProvider.OPENAI_REALTIME) {
                 reqBuilder.header("OpenAI-Beta", "realtime=v1")
@@ -232,15 +232,47 @@ class AiSubtitleWebServer(
                 reqBuilder.build(),
                 object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
-                        success.set(true)
-                        latch.countDown()
-                        webSocket.close(1000, "test done")
+                        if (provider == AiSubtitleProvider.TVGO) {
+                            success.set(true)
+                            latch.countDown()
+                            webSocket.close(1000, "test done")
+                        }
                     }
 
                     override fun onMessage(webSocket: WebSocket, text: String) {
-                        success.set(true)
-                        latch.countDown()
-                        webSocket.close(1000, "test done")
+                        try {
+                            val evt = JSONObject(text)
+                            val type = evt.optString("type")
+                            if (type == "session.created") {
+                                // 发送轻量 update 测试算法层鉴权与音色
+                                val testUpdate = JSONObject().apply {
+                                    put("type", "session.update")
+                                    put(
+                                        "session",
+                                        JSONObject().apply {
+                                            put("modalities", JSONArray().put("text"))
+                                            put("output_modalities", JSONArray().put("text"))
+                                            put("voice", "Cherry")
+                                            put("translation", JSONObject().apply { put("language", "zh") })
+                                        },
+                                    )
+                                }
+                                webSocket.send(testUpdate.toString())
+                            } else if (type == "session.updated") {
+                                success.set(true)
+                                latch.countDown()
+                                webSocket.close(1000, "test done")
+                            } else if (type == "error") {
+                                val err = evt.optJSONObject("error")
+                                errMsg.append(err?.optString("message") ?: "服务端报错: $text")
+                                latch.countDown()
+                                webSocket.close(1000, "error")
+                            }
+                        } catch (e: Exception) {
+                            success.set(true)
+                            latch.countDown()
+                            webSocket.close(1000, "test done")
+                        }
                     }
 
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -375,8 +407,9 @@ class AiSubtitleWebServer(
     <div class="hint">填写到版本前缀即可（如 https://dashscope.aliyuncs.com/compatible-mode/v1 或中转站地址）。</div>
 
     <label class="label">API Key (密钥 / Token)</label>
-    <input id="apiKey" type="password" value="${esc(cfg.apiKey)}" placeholder="sk-...">
-    <div class="hint">支持百炼个人及工作空间 Key（sk-ws-xxx）。密钥仅保存在您的电视本地，绝不上传第三方。</div>
+    <input id="apiKey" type="password" value="${esc(cfg.apiKey)}" placeholder="sk-..." oninput="onKeyInput(this.value)">
+    <div id="keyTip" class="hint">支持百炼个人及工作空间 Key（sk-ws-xxx）。密钥仅保存在您的电视本地，绝不上传第三方。</div>
+    <div id="keyLiveBadge" style="display:none; font-size:12px; color:var(--accent); font-weight:600; margin-bottom:10px;">✨ 已检测到 API Key 输入，请点击下方「保存并同步」或「测试接口连通性」</div>
 
     <label class="label">翻译 / 全模态模型名称 (Model)</label>
     <input id="modelName" type="text" value="${esc(cfg.modelName)}" placeholder="qwen3.8-livetranslate-flash-realtime / qwen-plus / glm-4-flash">
@@ -456,16 +489,25 @@ function showStatus(type, msg) {
   box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-async function testConnection() {
+function onKeyInput(val) {
+  const badge = document.getElementById('keyLiveBadge');
+  if (val && val.trim().length > 5) {
+    badge.style.display = 'block';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+async function testConnection(quiet = false) {
   const btn = document.getElementById('testBtn');
   const payload = getFormData();
   if (!payload.apiBaseUrl) {
-    showStatus('error', '请输入 API 接口地址');
+    if (!quiet) showStatus('error', '请输入 API 接口地址');
     return;
   }
   btn.disabled = true;
   btn.textContent = '⏳ 正在探测接口与鉴权...';
-  showStatus('info', '正在向指定接口发起连通性与密钥鉴权测试，请稍候...');
+  if (!quiet) showStatus('info', '正在向指定接口发起连通性与密钥鉴权测试，请稍候...');
   try {
     const res = await fetch('/api/test', {
       method: 'POST',
@@ -490,7 +532,7 @@ async function saveConfig() {
   const btn = document.getElementById('saveBtn');
   const payload = getFormData();
   btn.disabled = true;
-  btn.textContent = '💾 正在同步...';
+  btn.textContent = '💾 正在同步并验证...';
   try {
     const res = await fetch('/api/save', {
       method: 'POST',
@@ -499,8 +541,9 @@ async function saveConfig() {
     });
     const data = await res.json();
     if (data.ok) {
-      showStatus('success', '🎉 ' + (data.message || '配置已成功同步至电视！'));
-      alert('✅ 配置已成功保存！电视端 OwnTV 已即时热更新生效。');
+      showStatus('success', '🎉 ' + (data.message || '配置已成功保存！电视端 OwnTV 已即时热更新生效。') + ' 正在为您自动检测接口连通性...');
+      // 自动静默发起一次接口连通性验证并刷新提示
+      setTimeout(() => { testConnection(true); }, 500);
     } else {
       showStatus('error', '❌ ' + (data.message || '保存失败'));
     }

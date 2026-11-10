@@ -450,11 +450,6 @@ class RealtimeWsEngine(
         if (base.startsWith("https://")) base = "wss://" + base.removePrefix("https://")
         if (base.startsWith("http://")) base = "ws://" + base.removePrefix("http://")
 
-        // 若填写了阿里百炼专属 Workspace ID，支持 VsTV 同款专属子域名拼接
-        if (config.bailianWorkspace.isNotBlank() && base.contains("aliyuncs.com") && !base.contains(config.bailianWorkspace)) {
-            base = "wss://${config.bailianWorkspace.trim()}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
-        }
-
         return if (base.contains("model=")) {
             base
         } else {
@@ -469,6 +464,9 @@ class RealtimeWsEngine(
         val reqBuilder = Request.Builder().url(url)
         if (config.apiKey.isNotBlank()) {
             reqBuilder.header("Authorization", "Bearer ${config.apiKey.trim()}")
+        }
+        if (config.bailianWorkspace.isNotBlank()) {
+            reqBuilder.header("X-DashScope-WorkSpace", config.bailianWorkspace.trim())
         }
         if (config.provider == AiSubtitleProvider.OPENAI_REALTIME) {
             reqBuilder.header("OpenAI-Beta", "realtime=v1")
@@ -511,7 +509,9 @@ class RealtimeWsEngine(
      */
     private fun sendSessionUpdate(ws: WebSocket) {
         val sessionObj = JSONObject().apply {
+            put("modalities", JSONArray().put("text"))
             put("output_modalities", JSONArray().put("text"))
+            put("voice", "Cherry") // 覆盖默认非法的 Chelsie，适配百炼与通用 OpenAI Realtime
             put(
                 "translation",
                 JSONObject().apply {
