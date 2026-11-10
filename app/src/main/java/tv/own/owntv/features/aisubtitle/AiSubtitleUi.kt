@@ -152,17 +152,49 @@ fun AiSubtitleOverlay(
             else -> Unit
         }
 
-        // 2. 实时双语/中文翻译短句子卡片（底部居中，最多两行，随句切换）
+        // 2. 实时双语/中文翻译短句子渲染（支持顶部/新闻抬高/底部自适应，及半透明卡片/电影透亮无框风格）
         val active = cue
         if (active != null && (active.translatedText.isNotBlank() || active.originalText.isNotBlank())) {
-            Column(
-                modifier = Modifier
+            val isTop = config.positionPreset == SubtitlePositionPreset.TOP
+            val baseOffset = config.positionPreset.baseOffsetDp
+            val totalOffsetDp = baseOffset + config.verticalOffsetDp
+
+            val alignModifier = if (isTop) {
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = (40 + totalOffsetDp).coerceAtLeast(10).dp * sizeScale)
+            } else {
+                Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 26.dp * sizeScale)
+                    .padding(bottom = (26 + totalOffsetDp).coerceAtLeast(8).dp * sizeScale)
+            }
+
+            val isCinema = config.renderStyle == SubtitleRenderStyle.CINEMA_TRANSPARENT
+            val containerModifier = if (isCinema) {
+                alignModifier
+                    .widthIn(max = 1180.dp * sizeScale)
+                    .padding(horizontal = 14.dp * sizeScale, vertical = 4.dp * sizeScale)
+            } else {
+                alignModifier
                     .widthIn(max = 1080.dp * sizeScale)
                     .clip(RoundedCornerShape(12.dp))
                     .background(Color.Black.copy(alpha = 0.72f))
-                    .padding(horizontal = 22.dp * sizeScale, vertical = 9.dp * sizeScale),
+                    .padding(horizontal = 22.dp * sizeScale, vertical = 9.dp * sizeScale)
+            }
+
+            val textShadow = if (isCinema) {
+                Shadow(color = Color.Black.copy(alpha = 0.98f), offset = Offset(0f, 2.5f), blurRadius = 8f)
+            } else {
+                Shadow(color = Color.Black, offset = Offset(0f, 2f), blurRadius = 6f)
+            }
+            val origShadow = if (isCinema) {
+                Shadow(color = Color.Black.copy(alpha = 0.95f), offset = Offset(0f, 2f), blurRadius = 6f)
+            } else {
+                Shadow(color = Color.Black, offset = Offset(0f, 1.5f), blurRadius = 4f)
+            }
+
+            Column(
+                modifier = containerModifier,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 if (config.showOriginal && active.originalText.isNotBlank()) {
@@ -172,12 +204,12 @@ fun AiSubtitleOverlay(
                         overflow = TextOverflow.Ellipsis,
                         textAlign = TextAlign.Center,
                         style = TextStyle(
-                            color = Color(0xFF99F6E4),
+                            color = if (isCinema) Color(0xFF5EEAD4) else Color(0xFF99F6E4),
                             fontSize = (17.5f * scale).sp,
                             lineHeight = (22f * scale).sp,
                             fontFamily = FontFamily.SansSerif,
-                            fontWeight = FontWeight.Normal,
-                            shadow = Shadow(color = Color.Black, offset = Offset(0f, 1.5f), blurRadius = 4f),
+                            fontWeight = if (isCinema) FontWeight.Medium else FontWeight.Normal,
+                            shadow = origShadow,
                         ),
                     )
                     if (active.translatedText.isNotBlank()) {
@@ -195,8 +227,8 @@ fun AiSubtitleOverlay(
                             fontSize = (24f * scale).sp,
                             lineHeight = (30f * scale).sp,
                             fontFamily = FontFamily.SansSerif,
-                            fontWeight = FontWeight.SemiBold,
-                            shadow = Shadow(color = Color.Black, offset = Offset(0f, 2f), blurRadius = 6f),
+                            fontWeight = if (isCinema) FontWeight.Bold else FontWeight.SemiBold,
+                            shadow = textShadow,
                         ),
                     )
                 }
@@ -304,12 +336,24 @@ fun AiSubtitleSettingsDialog(
                 )
             }
 
-            // 2. 手机扫码配置入口（强烈推荐）
+            // 2. 自动启动与手机扫码入口
             item {
                 StagePopupOption(
-                    title = "手机扫码配置 API Key / 模型 / 中转站",
+                    title = "换台与进入播放时自动开启 AI 同传",
+                    subtitle = if (config.autoStart) "当前：已开启 · 进入任何频道均自动收听对齐，无需每次手动打开" else "当前：已关闭 · 每次换台需手动按遥控器开启",
+                    chosen = config.autoStart,
+                    leading = { focused -> StagePopupCheck(config.autoStart, focused) },
+                    onClick = {
+                        controller.configStore.update { it.copy(autoStart = !it.autoStart) }
+                    },
+                )
+            }
+
+            item {
+                StagePopupOption(
+                    title = "手机扫码配置 API Key / 模型 / 实时排版",
                     subtitle = if (config.apiKey.isNotBlank()) {
-                        "已配置密钥 (${config.apiKey.take(5)}***) · 地址: ${config.apiBaseUrl}"
+                        "已配置密钥 (${config.apiKey.take(5)}***) · 扫码可用手机网页拖拽滑块微调"
                     } else {
                         "用手机浏览器或微信扫码，一键粘贴智谱/阿里/谷歌/中转站接口与密钥"
                     },
@@ -319,9 +363,94 @@ fun AiSubtitleSettingsDialog(
                 )
             }
 
-            // 3. 延迟直播与显示参数微调
+            // 3. AI 实时同传视觉排版个性化矩阵
             item {
-                StagePopupLabel("延迟直播与字幕显示设置", Modifier.padding(top = 10.mpx))
+                StagePopupLabel("AI 实时同传视觉排版个性化矩阵", Modifier.padding(top = 10.mpx))
+            }
+
+            // 3.1 渲染风格双选 (半透明卡片 vs 电影透亮无框)
+            items(SubtitleRenderStyle.entries.size) { index ->
+                val style = SubtitleRenderStyle.entries[index]
+                val selected = config.renderStyle == style
+                StagePopupOption(
+                    title = style.displayName,
+                    subtitle = if (style == SubtitleRenderStyle.TRANSLUCENT_CARD) {
+                        "带 72% 黑底圆角卡片，适合新闻/综艺/反差剧烈的复杂画面"
+                    } else {
+                        "无底框纯粗体文字 + 深邃立体黑边阴影，绝不遮挡电影与大片画面"
+                    },
+                    chosen = selected,
+                    leading = { focused -> StagePopupRadio(selected, focused) },
+                    onClick = {
+                        controller.configStore.update { it.copy(renderStyle = style) }
+                    },
+                )
+            }
+
+            // 3.2 垂直位置三档预设
+            items(SubtitlePositionPreset.entries.size) { index ->
+                val preset = SubtitlePositionPreset.entries[index]
+                val selected = config.positionPreset == preset
+                StagePopupOption(
+                    title = preset.displayName,
+                    subtitle = when (preset) {
+                        SubtitlePositionPreset.BOTTOM -> "贴近画面常规底部，适合常规电视剧与电影"
+                        SubtitlePositionPreset.NEWS_ELEVATED -> "向上避让 72dp，专为央视/ABC/BBC/CNN 等底部新闻跑马灯设计"
+                        SubtitlePositionPreset.TOP -> "画面正上方居中，适合比分或操作栏位于底部的体育赛事与游戏直播"
+                    },
+                    chosen = selected,
+                    leading = { focused -> StagePopupRadio(selected, focused) },
+                    onClick = {
+                        controller.configStore.update { it.copy(positionPreset = preset) }
+                    },
+                )
+            }
+
+            // 3.3 遥控器 ◀ ▶ 像素级推拉微调 (-100dp ~ +200dp)
+            item {
+                val offsetText = if (config.verticalOffsetDp > 0) "+${config.verticalOffsetDp} dp" else "${config.verticalOffsetDp} dp"
+                AiStepperRow(
+                    title = "垂直位置像素级微调 (-100 ~ +200dp)",
+                    subtitle = "遥控器 ◀ 向下贴紧，▶ 向上推拉抬高（步进 10dp，背景字幕即时生效）",
+                    valueText = offsetText,
+                    onLeft = {
+                        controller.configStore.update {
+                            it.copy(verticalOffsetDp = (it.verticalOffsetDp - 10).coerceIn(-100, 200))
+                        }
+                    },
+                    onRight = {
+                        controller.configStore.update {
+                            it.copy(verticalOffsetDp = (it.verticalOffsetDp + 10).coerceIn(-100, 200))
+                        }
+                    },
+                )
+            }
+
+            // 3.4 字号 4 档快切 (80% / 100% / 120% / 140%)
+            item {
+                val scales = listOf(0.8f, 1.0f, 1.2f, 1.4f)
+                val labels = listOf("80% (精巧)", "100% (标准)", "120% (大字清晰)", "140% (客厅远距超大)")
+                val currentIndex = scales.indexOfFirst { kotlin.math.abs(it - config.fontSizeScale) < 0.05f }.let {
+                    if (it < 0) 1 else it
+                }
+                AiStepperRow(
+                    title = "字号缩放比例 (4 档快切)",
+                    subtitle = "遥控器 ◀ / ▶ 切换精巧、标准、大字与客厅远距",
+                    valueText = labels[currentIndex],
+                    onLeft = {
+                        val nextIdx = (currentIndex - 1).coerceAtLeast(0)
+                        controller.configStore.update { it.copy(fontSizeScale = scales[nextIdx]) }
+                    },
+                    onRight = {
+                        val nextIdx = (currentIndex + 1).coerceAtMost(scales.lastIndex)
+                        controller.configStore.update { it.copy(fontSizeScale = scales[nextIdx]) }
+                    },
+                )
+            }
+
+            // 4. 延迟直播与双语参数
+            item {
+                StagePopupLabel("延迟直播对齐与语言设置", Modifier.padding(top = 10.mpx))
             }
 
             item {
@@ -353,26 +482,7 @@ fun AiSubtitleSettingsDialog(
                 )
             }
 
-            item {
-                val pct = (config.fontSizeScale * 100).toInt()
-                AiStepperRow(
-                    title = "AI 字幕字号缩放",
-                    subtitle = "使用遥控器 ◀ / ▶ 调整字幕大小",
-                    valueText = "$pct%",
-                    onLeft = {
-                        controller.configStore.update {
-                            it.copy(fontSizeScale = (it.fontSizeScale - 0.1f).coerceIn(0.8f, 1.5f))
-                        }
-                    },
-                    onRight = {
-                        controller.configStore.update {
-                            it.copy(fontSizeScale = (it.fontSizeScale + 0.1f).coerceIn(0.8f, 1.5f))
-                        }
-                    },
-                )
-            }
-
-            // 4. 服务商预设快速切换
+            // 5. 服务商预设快速切换
             item {
                 StagePopupLabel("快速切换 AI 模型服务商预设", Modifier.padding(top = 10.mpx))
             }

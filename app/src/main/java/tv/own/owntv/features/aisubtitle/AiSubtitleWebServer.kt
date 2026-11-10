@@ -313,6 +313,11 @@ class AiSubtitleWebServer(
                 targetLang = obj.optString("targetLang", cur.targetLang).trim().ifBlank { "zh" },
                 leadSeconds = obj.optInt("leadSeconds", cur.leadSeconds),
                 showOriginal = obj.optBoolean("showOriginal", cur.showOriginal),
+                fontSizeScale = obj.optDouble("fontSizeScale", cur.fontSizeScale.toDouble()).toFloat(),
+                autoStart = obj.optBoolean("autoStart", cur.autoStart),
+                positionPreset = SubtitlePositionPreset.fromId(obj.optString("positionPreset", cur.positionPreset.id)),
+                verticalOffsetDp = obj.optInt("verticalOffsetDp", cur.verticalOffsetDp),
+                renderStyle = SubtitleRenderStyle.fromId(obj.optString("renderStyle", cur.renderStyle.id)),
             )
         }
         onConfigUpdatedFromWeb()
@@ -443,9 +448,56 @@ class AiSubtitleWebServer(
     </div>
     <div style="margin-top: 12px;">
       <label class="label">双语字幕显示</label>
-      <select id="showOriginal">
+      <select id="showOriginal" onchange="triggerLiveUpdate()">
         <option value="true" ${if (cfg.showOriginal) "selected" else ""}>显示「源语言原文 + 中文译文」双语字幕</option>
         <option value="false" ${if (!cfg.showOriginal) "selected" else ""}>仅显示翻译后的目标语言字幕</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <span class="label">🎨 AI 实时同传视觉排版个性化矩阵 (手机秒级联动)</span>
+    <div style="margin-bottom: 12px; margin-top: 8px;">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="autoStart" ${if (cfg.autoStart) "checked" else ""} onchange="triggerLiveUpdate()">
+        <span style="font-size:14px; font-weight:600;">进入播放器或换台时自动启用 AI 同传</span>
+      </label>
+      <div class="hint">开启后无需每次按遥控器，只要配置好 Key 即可全自动同传。</div>
+    </div>
+
+    <label class="label">渲染视觉风格 (Render Style)</label>
+    <div style="margin-bottom: 12px;">
+      <select id="renderStyle" onchange="triggerLiveUpdate()">
+        <option value="card" ${if (cfg.renderStyle == SubtitleRenderStyle.TRANSLUCENT_CARD) "selected" else ""}>电视半透明卡片 (强抗干扰)</option>
+        <option value="cinema" ${if (cfg.renderStyle == SubtitleRenderStyle.CINEMA_TRANSPARENT) "selected" else ""}>电影透亮无框 (纯粗体文字+立体阴影)</option>
+      </select>
+    </div>
+
+    <label class="label">垂直位置预设 (Position)</label>
+    <div style="margin-bottom: 12px;">
+      <select id="positionPreset" onchange="triggerLiveUpdate()">
+        <option value="bottom" ${if (cfg.positionPreset == SubtitlePositionPreset.BOTTOM) "selected" else ""}>标准底部 (常规影视贴底)</option>
+        <option value="news_elevated" ${if (cfg.positionPreset == SubtitlePositionPreset.NEWS_ELEVATED) "selected" else ""}>新闻抬高 (避让跑马灯 +72dp)</option>
+        <option value="top" ${if (cfg.positionPreset == SubtitlePositionPreset.TOP) "selected" else ""}>画面顶部 (体育赛事比分在底部)</option>
+      </select>
+    </div>
+
+    <div style="margin-bottom: 12px;">
+      <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+        <label class="label" style="margin:0;">像素级微调 (-100dp ~ +200dp)</label>
+        <span id="offsetVal" style="font-size:13px; color:var(--accent); font-weight:700;">${if (cfg.verticalOffsetDp > 0) "+${cfg.verticalOffsetDp}" else "${cfg.verticalOffsetDp}"} dp</span>
+      </div>
+      <input type="range" id="verticalOffsetDp" min="-100" max="200" step="5" value="${cfg.verticalOffsetDp}" oninput="onOffsetInput(this.value)">
+      <div class="hint">拖拽滑块，电视端字幕秒级推拉实时位移。</div>
+    </div>
+
+    <div>
+      <label class="label">字号缩放比例 (4 档快切)</label>
+      <select id="fontSizeScale" onchange="triggerLiveUpdate()">
+        <option value="0.8" ${if (kotlin.math.abs(cfg.fontSizeScale - 0.8f) < 0.05f) "selected" else ""}>80% (精巧)</option>
+        <option value="1.0" ${if (kotlin.math.abs(cfg.fontSizeScale - 1.0f) < 0.05f) "selected" else ""}>100% (标准)</option>
+        <option value="1.2" ${if (kotlin.math.abs(cfg.fontSizeScale - 1.2f) < 0.05f) "selected" else ""}>120% (大字清晰)</option>
+        <option value="1.4" ${if (kotlin.math.abs(cfg.fontSizeScale - 1.4f) < 0.05f) "selected" else ""}>140% (客厅远距超大)</option>
       </select>
     </div>
   </div>
@@ -477,8 +529,32 @@ function getFormData() {
     bailianWorkspace: document.getElementById('bailianWorkspace').value.trim(),
     leadSeconds: parseInt(document.getElementById('leadSeconds').value || '5', 10),
     targetLang: document.getElementById('targetLang').value,
-    showOriginal: document.getElementById('showOriginal').value === 'true'
+    showOriginal: document.getElementById('showOriginal').value === 'true',
+    autoStart: document.getElementById('autoStart').checked,
+    renderStyle: document.getElementById('renderStyle').value,
+    positionPreset: document.getElementById('positionPreset').value,
+    verticalOffsetDp: parseInt(document.getElementById('verticalOffsetDp').value || '0', 10),
+    fontSizeScale: parseFloat(document.getElementById('fontSizeScale').value || '1.0')
   };
+}
+
+let liveDebounce = null;
+function onOffsetInput(val) {
+  const num = parseInt(val, 10);
+  document.getElementById('offsetVal').textContent = (num > 0 ? '+' + num : num) + ' dp';
+  triggerLiveUpdate();
+}
+
+function triggerLiveUpdate() {
+  clearTimeout(liveDebounce);
+  liveDebounce = setTimeout(() => {
+    const payload = getFormData();
+    fetch('/api/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    }).catch(e => console.warn('Live sync err', e));
+  }, 120);
 }
 
 function showStatus(type, msg) {

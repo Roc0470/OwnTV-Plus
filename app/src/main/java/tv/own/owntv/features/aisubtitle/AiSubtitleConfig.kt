@@ -51,6 +51,33 @@ enum class AiSubtitleProvider(
 }
 
 /**
+ * AI 实时字幕垂直位置预设。
+ */
+enum class SubtitlePositionPreset(val id: String, val displayName: String, val baseOffsetDp: Int) {
+    BOTTOM("bottom", "标准底部 (常规影视贴底)", 0),
+    NEWS_ELEVATED("news_elevated", "新闻抬高 (避让跑马灯 +72dp)", 72),
+    TOP("top", "画面顶部 (体育赛事比分在底部)", 0);
+
+    companion object {
+        fun fromId(id: String?): SubtitlePositionPreset =
+            entries.firstOrNull { it.id == id } ?: BOTTOM
+    }
+}
+
+/**
+ * AI 实时字幕渲染视觉风格。
+ */
+enum class SubtitleRenderStyle(val id: String, val displayName: String) {
+    TRANSLUCENT_CARD("card", "电视半透明卡片 (强抗复杂画面干扰)"),
+    CINEMA_TRANSPARENT("cinema", "电影透亮无框 (纯粗体文字 + 立体阴影)");
+
+    companion object {
+        fun fromId(id: String?): SubtitleRenderStyle =
+            entries.firstOrNull { it.id == id } ?: TRANSLUCENT_CARD
+    }
+}
+
+/**
  * 常用服务商一键预设配置，方便用户在电视端或手机扫码页一键填入。
  */
 enum class AiProviderPreset(
@@ -144,6 +171,14 @@ data class AiSubtitleConfig(
     val showOriginal: Boolean = true,
     /** 字幕字号缩放比例（0.8f ~ 1.6f，默认 1.0f） */
     val fontSizeScale: Float = 1.0f,
+    /** 是否在打开播放器时自动开启 AI 实时同传（无需每次遥控器重复点击） */
+    val autoStart: Boolean = true,
+    /** 垂直位置预设（标准底部、新闻抬高、画面顶部） */
+    val positionPreset: SubtitlePositionPreset = SubtitlePositionPreset.BOTTOM,
+    /** 像素级垂直推拉微调量 (-100dp .. +200dp) */
+    val verticalOffsetDp: Int = 0,
+    /** 渲染视觉风格（电视半透明卡片 / 电影透亮无框） */
+    val renderStyle: SubtitleRenderStyle = SubtitleRenderStyle.TRANSLUCENT_CARD,
     /** 设备唯一标识（用于 tvgo 协议握手） */
     val deviceId: String = "",
 ) {
@@ -196,6 +231,10 @@ class AiSubtitleConfigStore(context: Context) {
             leadSeconds = prefs.getInt(KEY_LEAD_SECONDS, 5).coerceIn(MIN_LEAD_SECONDS, MAX_LEAD_SECONDS),
             showOriginal = prefs.getBoolean(KEY_SHOW_ORIGINAL, true),
             fontSizeScale = prefs.getFloat(KEY_FONT_SCALE, 1.0f).coerceIn(0.75f, 1.6f),
+            autoStart = prefs.getBoolean(KEY_AUTO_START, true),
+            positionPreset = SubtitlePositionPreset.fromId(prefs.getString(KEY_POSITION_PRESET, null)),
+            verticalOffsetDp = prefs.getInt(KEY_VERTICAL_OFFSET, 0).coerceIn(-100, 200),
+            renderStyle = SubtitleRenderStyle.fromId(prefs.getString(KEY_RENDER_STYLE, null)),
             deviceId = devId,
         )
     }
@@ -206,6 +245,7 @@ class AiSubtitleConfigStore(context: Context) {
             it.copy(
                 leadSeconds = it.leadSeconds.coerceIn(MIN_LEAD_SECONDS, MAX_LEAD_SECONDS),
                 fontSizeScale = it.fontSizeScale.coerceIn(0.75f, 1.6f),
+                verticalOffsetDp = it.verticalOffsetDp.coerceIn(-100, 200),
             )
         }
         prefs.edit()
@@ -220,6 +260,10 @@ class AiSubtitleConfigStore(context: Context) {
             .putInt(KEY_LEAD_SECONDS, next.leadSeconds)
             .putBoolean(KEY_SHOW_ORIGINAL, next.showOriginal)
             .putFloat(KEY_FONT_SCALE, next.fontSizeScale)
+            .putBoolean(KEY_AUTO_START, next.autoStart)
+            .putString(KEY_POSITION_PRESET, next.positionPreset.id)
+            .putInt(KEY_VERTICAL_OFFSET, next.verticalOffsetDp)
+            .putString(KEY_RENDER_STYLE, next.renderStyle.id)
             .apply()
         _config.value = next
     }
@@ -249,6 +293,10 @@ class AiSubtitleConfigStore(context: Context) {
         private const val KEY_LEAD_SECONDS = "lead_seconds"
         private const val KEY_SHOW_ORIGINAL = "show_original"
         private const val KEY_FONT_SCALE = "font_scale"
+        private const val KEY_AUTO_START = "auto_start"
+        private const val KEY_POSITION_PRESET = "position_preset"
+        private const val KEY_VERTICAL_OFFSET = "vertical_offset"
+        private const val KEY_RENDER_STYLE = "render_style"
         private const val KEY_DEVICE_ID = "device_id"
 
         const val MIN_LEAD_SECONDS = 3

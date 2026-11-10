@@ -1663,8 +1663,13 @@ fun OwnTVShell(
                 val activePlaybackEngine = if (liveOnExo) liveVm.previewEngine else mpvEngine
                 val currentChannelUrl = previewChannel?.streamUrl
                 LaunchedEffect(previewChannel?.id, liveOnExo) {
-                    if (aiSubController.isEnabled && currentChannelUrl != null) {
-                        aiSubController.onStreamChanged(activePlaybackEngine, currentChannelUrl)
+                    val cfg = aiSubController.configStore.config.value
+                    if (currentChannelUrl != null) {
+                        if (aiSubController.isEnabled) {
+                            aiSubController.onStreamChanged(activePlaybackEngine, currentChannelUrl)
+                        } else if (cfg.autoStart && cfg.isConfigured) {
+                            aiSubController.start(activePlaybackEngine, currentChannelUrl)
+                        }
                     }
                 }
                 tv.own.owntv.features.aisubtitle.AiSubtitleOverlay(
