@@ -223,7 +223,9 @@ class AiSubtitleController(
 
     private fun enqueueCue(cue: AiSubtitleCue) {
         val now = SystemClock.elapsedRealtime()
-        val leadMs = configStore.config.value.leadSeconds * 1000L
+        val cfg = configStore.config.value
+        val leadMs = cfg.leadSeconds * 1000L
+        val syncOffsetMs = cfg.syncOffsetMs.toLong()
         val isRunning = _state.value is AiSubtitleState.Running
         lastActivityElapsedMs = now
 
@@ -235,7 +237,7 @@ class AiSubtitleController(
             if (current.translatedText.isBlank() && cue.translatedText.isNotBlank()) {
                 activeCueStartElapsedMs = now // 中文译文刚出现，启动 1.8s 最小驻留保护倒计时
             }
-        } else if (isRunning && now >= cue.audioStartElapsedMs + leadMs) {
+        } else if (isRunning && now >= cue.audioStartElapsedMs + leadMs + syncOffsetMs) {
             // 2. 跨句翻篇 (全新 Cue ID)：判断当前屏幕上的旧句是否需要最小驻留保护
             val currentHasChinese = current != null && current.translatedText.isNotBlank()
             val currentDisplayDuration = now - activeCueStartElapsedMs
@@ -267,7 +269,9 @@ class AiSubtitleController(
 
     private fun tickCueDisplay() {
         val now = SystemClock.elapsedRealtime()
-        val leadMs = configStore.config.value.leadSeconds * 1000L
+        val cfg = configStore.config.value
+        val leadMs = cfg.leadSeconds * 1000L
+        val syncOffsetMs = cfg.syncOffsetMs.toLong()
         val current = _activeCue.value
 
         // 核心保护：若当前屏幕已有中文且展示还未满 1.8 秒，等待满足保底阅读时长后再翻篇
@@ -279,7 +283,7 @@ class AiSubtitleController(
             var toShow: AiSubtitleCue? = null
             synchronized(pendingCues) {
                 val ready = pendingCues.filter { cue ->
-                    now >= cue.audioStartElapsedMs + leadMs
+                    now >= cue.audioStartElapsedMs + leadMs + syncOffsetMs
                 }
                 if (ready.isNotEmpty()) {
                     val latest = ready.last()

@@ -179,6 +179,8 @@ data class AiSubtitleConfig(
     val verticalOffsetDp: Int = 0,
     /** 渲染视觉风格（电视半透明卡片 / 电影透亮无框） */
     val renderStyle: SubtitleRenderStyle = SubtitleRenderStyle.TRANSLUCENT_CARD,
+    /** 字幕时序快慢微调偏移量（毫秒，-5000ms ~ +5000ms，默认 0ms；负数表示字幕提前，正数表示字幕延后） */
+    val syncOffsetMs: Int = 0,
     /** 设备唯一标识（用于 tvgo 协议握手） */
     val deviceId: String = "",
 ) {
@@ -235,6 +237,7 @@ class AiSubtitleConfigStore(context: Context) {
             positionPreset = SubtitlePositionPreset.fromId(prefs.getString(KEY_POSITION_PRESET, null)),
             verticalOffsetDp = prefs.getInt(KEY_VERTICAL_OFFSET, 0).coerceIn(-100, 200),
             renderStyle = SubtitleRenderStyle.fromId(prefs.getString(KEY_RENDER_STYLE, null)),
+            syncOffsetMs = prefs.getInt(KEY_SYNC_OFFSET, 0).coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS),
             deviceId = devId,
         )
     }
@@ -246,6 +249,7 @@ class AiSubtitleConfigStore(context: Context) {
                 leadSeconds = it.leadSeconds.coerceIn(MIN_LEAD_SECONDS, MAX_LEAD_SECONDS),
                 fontSizeScale = it.fontSizeScale.coerceIn(0.75f, 1.6f),
                 verticalOffsetDp = it.verticalOffsetDp.coerceIn(-100, 200),
+                syncOffsetMs = it.syncOffsetMs.coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS),
             )
         }
         prefs.edit()
@@ -264,8 +268,19 @@ class AiSubtitleConfigStore(context: Context) {
             .putString(KEY_POSITION_PRESET, next.positionPreset.id)
             .putInt(KEY_VERTICAL_OFFSET, next.verticalOffsetDp)
             .putString(KEY_RENDER_STYLE, next.renderStyle.id)
+            .putInt(KEY_SYNC_OFFSET, next.syncOffsetMs)
             .apply()
         _config.value = next
+    }
+
+    /** 调整字幕同步偏移量（毫秒，正数延后，负数提前） */
+    fun adjustSyncOffset(deltaMs: Int) {
+        update { it.copy(syncOffsetMs = (it.syncOffsetMs + deltaMs).coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)) }
+    }
+
+    /** 重置字幕同步偏移量至 0 毫秒 */
+    fun resetSyncOffset() {
+        update { it.copy(syncOffsetMs = 0) }
     }
 
     /** 应用预设模板（保留已填写的 API Key） */
@@ -297,9 +312,13 @@ class AiSubtitleConfigStore(context: Context) {
         private const val KEY_POSITION_PRESET = "position_preset"
         private const val KEY_VERTICAL_OFFSET = "vertical_offset"
         private const val KEY_RENDER_STYLE = "render_style"
+        private const val KEY_SYNC_OFFSET = "sync_offset_ms"
         private const val KEY_DEVICE_ID = "device_id"
 
         const val MIN_LEAD_SECONDS = 3
         const val MAX_LEAD_SECONDS = 12
+        const val MIN_SYNC_OFFSET_MS = -5000
+        const val MAX_SYNC_OFFSET_MS = 5000
+        const val STEP_SYNC_OFFSET_MS = 500
     }
 }

@@ -472,6 +472,29 @@ fun AiSubtitleSettingsDialog(
             }
 
             item {
+                val offsetSec = config.syncOffsetMs / 1000f
+                val offsetLabel = when {
+                    config.syncOffsetMs > 0 -> "+${String.format(java.util.Locale.US, "%.1f", offsetSec)}s (字幕延后)"
+                    config.syncOffsetMs < 0 -> "${String.format(java.util.Locale.US, "%.1f", offsetSec)}s (字幕提前)"
+                    else -> "0.0s (正常对齐)"
+                }
+                AiStepperRow(
+                    title = "字幕时序快慢微调 (同步校准)",
+                    subtitle = "遥控器 ◀ 字幕提前 0.5s (防慢)，▶ 字幕延后 0.5s (防抢跑)，按 OK 键重置 0.0s",
+                    valueText = offsetLabel,
+                    onLeft = {
+                        controller.configStore.adjustSyncOffset(-AiSubtitleConfigStore.STEP_SYNC_OFFSET_MS)
+                    },
+                    onRight = {
+                        controller.configStore.adjustSyncOffset(AiSubtitleConfigStore.STEP_SYNC_OFFSET_MS)
+                    },
+                    onClick = {
+                        controller.configStore.resetSyncOffset()
+                    },
+                )
+            }
+
+            item {
                 StagePopupOption(
                     title = "显示双语字幕（源语言原文 + 中文译文）",
                     subtitle = if (config.showOriginal) "当前：同时显示识别原文与翻译结果" else "当前：仅显示翻译后的目标语言",
@@ -513,11 +536,12 @@ private fun AiStepperRow(
     valueText: String,
     onLeft: () -> Unit,
     onRight: () -> Unit,
+    onClick: (() -> Unit)? = null,
 ) {
     StagePopupOption(
         title = title,
         subtitle = subtitle,
-        onClick = onRight,
+        onClick = { onClick?.invoke() ?: onRight() },
         modifier = Modifier.onPreviewKeyEvent { e ->
             if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
             when (e.key) {

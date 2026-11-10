@@ -318,6 +318,7 @@ class AiSubtitleWebServer(
                 positionPreset = SubtitlePositionPreset.fromId(obj.optString("positionPreset", cur.positionPreset.id)),
                 verticalOffsetDp = obj.optInt("verticalOffsetDp", cur.verticalOffsetDp),
                 renderStyle = SubtitleRenderStyle.fromId(obj.optString("renderStyle", cur.renderStyle.id)),
+                syncOffsetMs = obj.optInt("syncOffsetMs", cur.syncOffsetMs),
             )
         }
         onConfigUpdatedFromWeb()
@@ -502,6 +503,29 @@ class AiSubtitleWebServer(
     </div>
   </div>
 
+  <div class="card">
+    <span class="label">⏱️ 字幕时序快慢微调 (毫秒级零卡顿校准)</span>
+    <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+      <span class="hint" style="margin:0;">字幕慢了向左调（提前），字幕快了向右调（延后）</span>
+      <span id="syncOffsetVal" style="font-size:13px; color:var(--accent); font-weight:700;">${
+          when {
+              cfg.syncOffsetMs > 0 -> "+${String.format(java.util.Locale.US, "%.1f", cfg.syncOffsetMs / 1000f)}s (延后)"
+              cfg.syncOffsetMs < 0 -> "${String.format(java.util.Locale.US, "%.1f", cfg.syncOffsetMs / 1000f)}s (提前)"
+              else -> "0.0s (正常对齐)"
+          }
+      }</span>
+    </div>
+    <input type="range" id="syncOffsetMs" min="-4000" max="4000" step="250" value="${cfg.syncOffsetMs}" oninput="onSyncOffsetInput(this.value)">
+    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap:6px; margin-top:8px;">
+      <button type="button" class="preset-btn" style="text-align:center; padding:8px 0;" onclick="stepSyncOffset(-1000)">-1.0s</button>
+      <button type="button" class="preset-btn" style="text-align:center; padding:8px 0;" onclick="stepSyncOffset(-500)">-0.5s</button>
+      <button type="button" class="preset-btn" style="text-align:center; padding:8px 0; color:#fff;" onclick="stepSyncOffset(0, true)">重置 0s</button>
+      <button type="button" class="preset-btn" style="text-align:center; padding:8px 0;" onclick="stepSyncOffset(500)">+0.5s</button>
+      <button type="button" class="preset-btn" style="text-align:center; padding:8px 0;" onclick="stepSyncOffset(1000)">+1.0s</button>
+    </div>
+    <div class="hint" style="margin-top:6px;">拖动滑块或点击快捷按钮，电视画面无需缓冲暂停，字幕弹出时刻瞬间平滑对齐。</div>
+  </div>
+
   <div class="btn-group">
     <button type="button" class="btn btn-test" id="testBtn" onclick="testConnection()">🔍 测试接口连通性 (Test)</button>
     <button type="button" class="btn btn-primary" id="saveBtn" onclick="saveConfig()">💾 保存并同步至电视</button>
@@ -534,6 +558,7 @@ function getFormData() {
     renderStyle: document.getElementById('renderStyle').value,
     positionPreset: document.getElementById('positionPreset').value,
     verticalOffsetDp: parseInt(document.getElementById('verticalOffsetDp').value || '0', 10),
+    syncOffsetMs: parseInt(document.getElementById('syncOffsetMs').value || '0', 10),
     fontSizeScale: parseFloat(document.getElementById('fontSizeScale').value || '1.0')
   };
 }
@@ -543,6 +568,24 @@ function onOffsetInput(val) {
   const num = parseInt(val, 10);
   document.getElementById('offsetVal').textContent = (num > 0 ? '+' + num : num) + ' dp';
   triggerLiveUpdate();
+}
+
+function onSyncOffsetInput(val) {
+  const num = parseInt(val, 10);
+  const sec = (num / 1000).toFixed(1);
+  let text = '0.0s (正常对齐)';
+  if (num > 0) text = '+' + sec + 's (延后)';
+  else if (num < 0) text = sec + 's (提前)';
+  document.getElementById('syncOffsetVal').textContent = text;
+  triggerLiveUpdate();
+}
+
+function stepSyncOffset(delta, isReset) {
+  const input = document.getElementById('syncOffsetMs');
+  let next = isReset ? 0 : parseInt(input.value || '0', 10) + delta;
+  next = Math.max(-4000, Math.min(4000, next));
+  input.value = next;
+  onSyncOffsetInput(next);
 }
 
 function triggerLiveUpdate() {
