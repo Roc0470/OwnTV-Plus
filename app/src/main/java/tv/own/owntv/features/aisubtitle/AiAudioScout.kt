@@ -33,6 +33,8 @@ import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
+private const val TAG = "AiAudioScout"
+
 /**
  * 16kHz 单声道 16-bit PCM 音频块数据包。
  *
