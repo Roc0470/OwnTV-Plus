@@ -1657,19 +1657,14 @@ fun OwnTVShell(
                     sizeScale = overlayScale,
                 )
             }
-            // AI 实时字幕与延迟直播叠加层（同时支持 ExoPlayer 直播流与 MPV 播放器）
-            if (!inPip) {
+            // AI 实时字幕叠加层（仅在全屏播放且用户主动开启 AI 字幕时介入，绝不在频道浏览/预览时并发争抢）
+            if (isFull && !inPip) {
                 val aiSubController = koinInject<tv.own.owntv.features.aisubtitle.AiSubtitleController>()
                 val activePlaybackEngine = if (liveOnExo) liveVm.previewEngine else mpvEngine
-                val currentChannelUrl = previewChannel?.streamUrl
-                LaunchedEffect(previewChannel?.id, liveOnExo) {
-                    val cfg = aiSubController.configStore.config.value
-                    if (currentChannelUrl != null) {
-                        if (aiSubController.isEnabled) {
-                            aiSubController.onStreamChanged(activePlaybackEngine, currentChannelUrl)
-                        } else if (cfg.autoStart && cfg.isConfigured) {
-                            aiSubController.start(activePlaybackEngine, currentChannelUrl)
-                        }
+                val currentChannelUrl = previewChannel?.streamUrl ?: player.currentMediaUrl
+                LaunchedEffect(currentChannelUrl, isFull) {
+                    if (aiSubController.isEnabled && currentChannelUrl != null) {
+                        aiSubController.onStreamChanged(activePlaybackEngine, currentChannelUrl)
                     }
                 }
                 tv.own.owntv.features.aisubtitle.AiSubtitleOverlay(

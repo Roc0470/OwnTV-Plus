@@ -4,10 +4,14 @@ package tv.own.owntv.features.aisubtitle
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
@@ -18,6 +22,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.audio.AudioCapabilities
+import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -194,13 +199,10 @@ class Pcm16kAudioProcessor(
             }
         }
 
-        // 消耗输入 Buffer 并向下游写入等长全 0 字节（静音，保持 AudioSink 推进）
+        // 消耗输入 Buffer，下游采用 HeadlessAudioSink，直接输出空缓冲节省内存
         val consumedBytes = inFrames * frameSize
         inputBuffer.position(inputBuffer.position() + consumedBytes)
-        val silentOut = replaceOutputBuffer(consumedBytes)
-        for (i in 0 until consumedBytes) {
-            silentOut.put(0.toByte())
-        }
+        val silentOut = replaceOutputBuffer(0)
         silentOut.flip()
 
         // 重采样至 16000Hz Mono 16-bit LE
@@ -300,12 +302,111 @@ class Pcm16kAudioProcessor(
 }
 
 /**
+ * 纯内存、零硬件物理声卡占用的 Headless AudioSink。
+ *
+ * 核心职责：
+ * 1. 彻底斩断对 Android 底层物理 AudioTrack 的创建申请，杜绝任何 AudioFlinger status: -12 崩溃与声卡独占冲突；
+ * 2. 接收解码器输出的 PCM 缓冲，直接投递给 [Pcm16kAudioProcessor] 进行 16kHz 重采样与分段识别；
+ * 3. 维护单调递增的音频时钟，向上游解码器汇报 100% 消耗，驱动 ExoPlayer 管线平滑解码。
+ */
+@UnstableApi
+class HeadlessAudioSink(
+    private val processor: Pcm16kAudioProcessor,
+) : AudioSink {
+    private var listener: AudioSink.Listener? = null
+    private var isPlaying = false
+    private var lastPtsUs = 0L
+    private var lastPtsElapsedMs = 0L
+    private var playbackParams = PlaybackParameters.DEFAULT
+
+    override fun setListener(listener: AudioSink.Listener) {
+        this.listener = listener
+    }
+
+    override fun supportsFormat(format: Format): Boolean = true
+    override fun getFormatSupport(format: Format): Int = AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY
+    override fun getFormatOffloadSupport(format: Format): AudioOffloadSupport =
+        AudioOffloadSupport.DEFAULT_UNSUPPORTED
+
+    override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
+        if (!isPlaying || lastPtsElapsedMs == 0L) return lastPtsUs
+        val elapsedUs = (SystemClock.elapsedRealtime() - lastPtsElapsedMs) * 1000L
+        return lastPtsUs + elapsedUs
+    }
+
+    override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
+        val enc = if (inputFormat.pcmEncoding != C.ENCODING_INVALID) inputFormat.pcmEncoding else C.ENCODING_PCM_16BIT
+        processor.configure(AudioProcessor.AudioFormat(inputFormat.sampleRate, inputFormat.channelCount, enc))
+        processor.flush()
+    }
+
+    override fun play() {
+        isPlaying = true
+        lastPtsElapsedMs = SystemClock.elapsedRealtime()
+    }
+
+    override fun pause() {
+        if (isPlaying) {
+            lastPtsUs = getCurrentPositionUs(false)
+            isPlaying = false
+            lastPtsElapsedMs = 0L
+        }
+    }
+
+    override fun handleBuffer(
+        buffer: ByteBuffer,
+        presentationTimeUs: Long,
+        encodedAccessUnitCount: Int,
+    ): Boolean {
+        lastPtsUs = presentationTimeUs
+        lastPtsElapsedMs = SystemClock.elapsedRealtime()
+        processor.queueInput(buffer)
+        buffer.position(buffer.limit())
+        return true
+    }
+
+    override fun handleDiscontinuity() {}
+    override fun playToEndOfStream() {}
+    override fun isEnded(): Boolean = false
+    override fun hasPendingData(): Boolean = false
+
+    override fun setPlaybackParameters(playbackParameters: PlaybackParameters) {
+        playbackParams = playbackParameters
+    }
+
+    override fun getPlaybackParameters(): PlaybackParameters = playbackParams
+    override fun setSkipSilenceEnabled(skipSilenceEnabled: Boolean) {}
+    override fun getSkipSilenceEnabled(): Boolean = false
+    override fun setAudioAttributes(audioAttributes: AudioAttributes) {}
+    override fun getAudioAttributes(): AudioAttributes = AudioAttributes.DEFAULT
+    override fun setAudioSessionId(audioSessionId: Int) {}
+    override fun setAuxEffectInfo(auxEffectInfo: androidx.media3.common.AuxEffectInfo) {}
+    override fun getAudioTrackBufferSizeUs(): Long = 0L
+    override fun enableTunnelingV21() {}
+    override fun disableTunneling() {}
+    override fun setVolume(volume: Float) {}
+
+    override fun flush() {
+        processor.flush()
+        lastPtsElapsedMs = SystemClock.elapsedRealtime()
+    }
+
+    override fun reset() {
+        flush()
+        processor.reset()
+        isPlaying = false
+        lastPtsUs = 0L
+        lastPtsElapsedMs = 0L
+    }
+}
+
+/**
  * 后台音频探路器 (AiAudioScout)。
  *
  * 复刻 VsTV 的“提前收听 + 延迟直播”架构：
  * - 当开启 AI 实时字幕时，主画面播放器暂停 `leadSeconds` 秒（例如 5 秒），而 [AiAudioScout] 保持在直播最前沿实时拉取音频轨道；
  * - 禁用视频轨道解码（`C.TRACK_TYPE_VIDEO` disabled），完全不占用硬件视频解码器（MediaCodec Video），只解码音频轨；
- * - 挂载 [Pcm16kAudioProcessor] 实时提取 16000Hz Mono 16-bit PCM 送往 AI 翻译引擎，同时向 AudioTrack 输出全 0 静音。
+ * - 挂载 [HeadlessAudioSink] 纯内存消费 PCM 数据，绝对不向系统申请硬件 AudioTrack，零硬件声卡冲突。
  */
 @UnstableApi
 class AiAudioScout(
@@ -356,13 +457,8 @@ class AiAudioScout(
                         enableFloatOutput: Boolean,
                         enableAudioOutputPlaybackParams: Boolean,
                     ): AudioSink {
-                        @Suppress("DEPRECATION")
-                        return DefaultAudioSink.Builder()
-                            .setAudioCapabilities(AudioCapabilities.DEFAULT_AUDIO_CAPABILITIES)
-                            .setEnableFloatOutput(false)
-                            .setEnableAudioOutputPlaybackParameters(enableAudioOutputPlaybackParams)
-                            .setAudioProcessors(arrayOf(StereoDownmix.processor(), processor))
-                            .build()
+                        // 使用纯内存零硬件占用的 HeadlessAudioSink，彻底杜绝 AudioFlinger status: -12
+                        return HeadlessAudioSink(processor)
                     }
 
                     override fun buildAudioRenderers(

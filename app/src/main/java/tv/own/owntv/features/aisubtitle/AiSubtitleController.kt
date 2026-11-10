@@ -140,26 +140,20 @@ class AiSubtitleController(
         // 2. 启动后台音频探路器 (AiAudioScout) 超前拉取音频流
         scout?.start(streamUrl)
 
-        // 3. 启动主画面延迟直播倒计时（暂停主画面 leadSeconds 秒，攒出 AI 识别与翻译时间差）
-        val leadSecs = cfg.leadSeconds.coerceIn(AiSubtitleConfigStore.MIN_LEAD_SECONDS, AiSubtitleConfigStore.MAX_LEAD_SECONDS)
-        prepareJob = scope.launch {
-            if (playbackEngine.isPlaying.value) {
-                runCatching {
-                    playbackEngine.togglePlayPause()
-                    pausedMainPlayerForLead = true
+        // 3. 启动主画面延迟直播倒计时（绝不强制暂停主画面，避免部分电视硬件/HLS无时移流卡死）
+        val leadSecs = cfg.leadSeconds.coerceIn(0, AiSubtitleConfigStore.MAX_LEAD_SECONDS)
+        if (leadSecs > 0) {
+            prepareJob = scope.launch {
+                for (remaining in leadSecs downTo 1) {
+                    _state.value = AiSubtitleState.Preparing(
+                        secondsLeft = remaining,
+                        leadSeconds = leadSecs,
+                    )
+                    delay(1000L)
                 }
+                _state.value = AiSubtitleState.Running()
             }
-            for (remaining in leadSecs downTo 1) {
-                _state.value = AiSubtitleState.Preparing(
-                    secondsLeft = remaining,
-                    leadSeconds = leadSecs,
-                )
-                delay(1000L)
-            }
-            if (pausedMainPlayerForLead && !playbackEngine.isPlaying.value) {
-                runCatching { playbackEngine.togglePlayPause() }
-            }
-            pausedMainPlayerForLead = false
+        } else {
             _state.value = AiSubtitleState.Running()
         }
 

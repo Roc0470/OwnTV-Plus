@@ -171,8 +171,8 @@ data class AiSubtitleConfig(
     val showOriginal: Boolean = true,
     /** 字幕字号缩放比例（0.8f ~ 1.6f，默认 1.0f） */
     val fontSizeScale: Float = 1.0f,
-    /** 是否在打开播放器时自动开启 AI 实时同传（无需每次遥控器重复点击） */
-    val autoStart: Boolean = true,
+    /** 是否在打开播放器时自动开启 AI 实时同传（默认关闭，保持原版零干扰秒播） */
+    val autoStart: Boolean = false,
     /** 垂直位置预设（标准底部、新闻抬高、画面顶部） */
     val positionPreset: SubtitlePositionPreset = SubtitlePositionPreset.BOTTOM,
     /** 像素级垂直推拉微调量 (-100dp .. +200dp) */
@@ -233,7 +233,7 @@ class AiSubtitleConfigStore(context: Context) {
             leadSeconds = prefs.getInt(KEY_LEAD_SECONDS, 5).coerceIn(MIN_LEAD_SECONDS, MAX_LEAD_SECONDS),
             showOriginal = prefs.getBoolean(KEY_SHOW_ORIGINAL, true),
             fontSizeScale = prefs.getFloat(KEY_FONT_SCALE, 1.0f).coerceIn(0.75f, 1.6f),
-            autoStart = prefs.getBoolean(KEY_AUTO_START, true),
+            autoStart = prefs.getBoolean(KEY_AUTO_START, false),
             positionPreset = SubtitlePositionPreset.fromId(prefs.getString(KEY_POSITION_PRESET, null)),
             verticalOffsetDp = prefs.getInt(KEY_VERTICAL_OFFSET, 0).coerceIn(-100, 200),
             renderStyle = SubtitleRenderStyle.fromId(prefs.getString(KEY_RENDER_STYLE, null)),
