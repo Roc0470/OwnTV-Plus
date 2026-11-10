@@ -511,7 +511,7 @@ class RealtimeWsEngine(
         val sessionObj = JSONObject().apply {
             put("modalities", JSONArray().put("text"))
             put("output_modalities", JSONArray().put("text"))
-            put("voice", "Cherry") // 覆盖默认非法的 Chelsie，适配百炼与通用 OpenAI Realtime
+            put("voice", JSONObject.NULL) // 必须显式置空，防止百炼报错 'Voice is not supported'
             put(
                 "translation",
                 JSONObject().apply {
@@ -613,8 +613,8 @@ class RealtimeWsEngine(
                     onEngineStatus("服务端错误: $errMsg")
                 }
                 else -> {
-                    // 其他心跳或上下文事件，仅调试记录
-                    Log.v(TAG, "Unhandled server event: $type")
+                    // 其他心跳或上下文事件，输出 debug 日志以便追踪百炼原生协议帧
+                    Log.d(TAG, "Server event: $type -> ${rawJson.take(150)}")
                 }
             }
         }.onFailure { err ->

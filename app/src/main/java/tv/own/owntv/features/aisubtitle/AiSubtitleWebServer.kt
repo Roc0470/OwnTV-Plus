@@ -252,7 +252,7 @@ class AiSubtitleWebServer(
                                         JSONObject().apply {
                                             put("modalities", JSONArray().put("text"))
                                             put("output_modalities", JSONArray().put("text"))
-                                            put("voice", "Cherry")
+                                            put("voice", JSONObject.NULL)
                                             put("translation", JSONObject().apply { put("language", "zh") })
                                         },
                                     )
