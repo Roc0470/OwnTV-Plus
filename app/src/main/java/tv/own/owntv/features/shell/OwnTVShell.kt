@@ -1662,9 +1662,17 @@ fun OwnTVShell(
                 val aiSubController = koinInject<tv.own.owntv.features.aisubtitle.AiSubtitleController>()
                 val activePlaybackEngine = if (liveOnExo) liveVm.previewEngine else mpvEngine
                 val currentChannelUrl = previewChannel?.streamUrl ?: player.currentMediaUrl
-                LaunchedEffect(currentChannelUrl, isFull) {
-                    if (aiSubController.isEnabled && currentChannelUrl != null) {
-                        aiSubController.onStreamChanged(activePlaybackEngine, currentChannelUrl)
+                val aiConfig by aiSubController.configStore.config.collectAsStateWithLifecycle()
+                LaunchedEffect(currentChannelUrl, isFull, aiConfig.autoStart) {
+                    if ((aiSubController.isEnabled || aiConfig.autoStart) && currentChannelUrl != null) {
+                        aiSubController.start(activePlaybackEngine, currentChannelUrl)
+                    }
+                }
+                DisposableEffect(Unit) {
+                    onDispose {
+                        if (aiSubController.isEnabled) {
+                            aiSubController.stop()
+                        }
                     }
                 }
                 tv.own.owntv.features.aisubtitle.AiSubtitleOverlay(

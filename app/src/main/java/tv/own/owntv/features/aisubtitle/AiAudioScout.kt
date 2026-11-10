@@ -10,6 +10,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -323,8 +324,21 @@ class HeadlessAudioSink(
         this.listener = listener
     }
 
-    override fun supportsFormat(format: Format): Boolean = true
-    override fun getFormatSupport(format: Format): Int = AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY
+    override fun supportsFormat(format: Format): Boolean {
+        val mime = format.sampleMimeType ?: return false
+        val isRaw = MimeTypes.AUDIO_RAW.equals(mime, ignoreCase = true) || mime.startsWith("audio/raw")
+        val isPcm = format.pcmEncoding == C.ENCODING_PCM_16BIT || format.pcmEncoding == C.ENCODING_PCM_FLOAT
+        return isRaw || isPcm
+    }
+
+    override fun getFormatSupport(format: Format): Int {
+        return if (supportsFormat(format)) {
+            AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY
+        } else {
+            AudioSink.SINK_FORMAT_UNSUPPORTED
+        }
+    }
+
     override fun getFormatOffloadSupport(format: Format): AudioOffloadSupport =
         AudioOffloadSupport.DEFAULT_UNSUPPORTED
 
@@ -336,6 +350,7 @@ class HeadlessAudioSink(
 
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
         val enc = if (inputFormat.pcmEncoding != C.ENCODING_INVALID) inputFormat.pcmEncoding else C.ENCODING_PCM_16BIT
+        Log.i(TAG, "HeadlessAudioSink configure: sampleRate=${inputFormat.sampleRate}, channels=${inputFormat.channelCount}, enc=$enc, mime=${inputFormat.sampleMimeType}")
         processor.configure(AudioProcessor.AudioFormat(inputFormat.sampleRate, inputFormat.channelCount, enc))
         processor.flush()
     }
