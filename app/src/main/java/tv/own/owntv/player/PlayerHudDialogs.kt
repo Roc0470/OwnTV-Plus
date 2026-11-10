@@ -81,6 +81,10 @@ internal fun TrackDialog(
     subDelayMs: Int = 0,
     onAdjustSubDelay: ((Int) -> Unit)? = null,
     onResetSubDelay: () -> Unit = {},
+    // AI 实时字幕与延迟直播入口
+    aiSubtitleEnabled: Boolean = false,
+    onToggleAiSubtitle: (() -> Unit)? = null,
+    onOpenAiSubtitleSettings: (() -> Unit)? = null,
 ) {
     val focus = remember { FocusRequester() }
     BackHandler { onDismiss() }
@@ -138,6 +142,23 @@ internal fun TrackDialog(
             }
             if (onSelectLocalSubtitle != null) {
                 item { ActionRow(stringResource(R.string.player_select_local_subtitle), OwnTVIcon.FOLDER, onSelectLocalSubtitle) }
+            }
+        }
+        // AI 实时字幕与延迟直播（兼容直播与点播）
+        if (onToggleAiSubtitle != null || onOpenAiSubtitleSettings != null) {
+            item { tv.own.owntv.ui.stage.StagePopupLabel(stringResource(R.string.player_ai_subtitle_section), Modifier.padding(top = 12.mpx)) }
+            if (onToggleAiSubtitle != null) {
+                item {
+                    tv.own.owntv.ui.stage.StagePopupOption(
+                        title = stringResource(if (aiSubtitleEnabled) R.string.player_ai_subtitle_toggle_off else R.string.player_ai_subtitle_toggle_on),
+                        chosen = aiSubtitleEnabled,
+                        onClick = onToggleAiSubtitle,
+                        leading = { f -> tv.own.owntv.ui.stage.StagePopupCheck(aiSubtitleEnabled, f) },
+                    )
+                }
+            }
+            if (onOpenAiSubtitleSettings != null) {
+                item { ActionRow(stringResource(R.string.player_ai_subtitle_settings), OwnTVIcon.SPARKLE, onOpenAiSubtitleSettings) }
             }
         }
         // ADJUST (subtitles dialog): timing panel for the active subtitle.

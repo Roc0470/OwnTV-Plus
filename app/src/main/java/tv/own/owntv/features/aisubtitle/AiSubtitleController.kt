@@ -1,0 +1,301 @@
+// DO NOT EDIT — generated
+package tv.own.owntv.features.aisubtitle
+
+import android.content.Context
+import android.os.SystemClock
+import android.util.Log
+import androidx.media3.common.util.UnstableApi
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import tv.own.owntv.player.LivePreviewEngine
+import tv.own.owntv.player.OwnTVPlayer
+import tv.own.owntv.player.PlaybackEngine
+
+/**
+ * AI 实时字幕运行状态：
+ * - [Off]：已关闭
+ * - [Preparing]：正在提前收听并缓冲翻译（主播放器暂停，显示剩余倒计时秒数，复刻 VsTV 延迟直播对齐体验）
+ * - [Running]：延迟直播同步播放中，实时按时间戳对齐弹出双语/中文翻译字幕
+ * - [Error]：配置缺失或连接异常提示
+ */
+sealed interface AiSubtitleState {
+    data object Off : AiSubtitleState
+    data class Preparing(val secondsLeft: Int, val leadSeconds: Int) : AiSubtitleState
+    data class Running(val statusHint: String = "") : AiSubtitleState
+    data class Error(val message: String) : AiSubtitleState
+}
+
+/**
+ * AI 实时字幕与延迟直播核心调度控制器 ([AiSubtitleController])。
+ *
+ * 核心机制：
+ * 1. **提前收听 + 延迟直播对齐（Lead-time Delayed Live）**：
+ *    开启 AI 字幕时，控制器立即启动后台 [AiAudioScout] 探路播放器拉取直播流最前沿音频并送往 [AiSubtitleEngine]；
+ *    同时将当前主画面播放器 ([PlaybackEngine]) 暂停 `leadSeconds` 秒（例如 5 秒），并在屏幕上方展示倒计时横幅：
+ *    `AI 字幕准备中 · 正在提前收听并翻译，约 X 秒后开始播放`。
+ *    倒计时结束后自动恢复主画面播放，此时主画面刚好落后直播前沿 `leadSeconds` 秒，而 AI 翻译耗时恰好被这段提前量抵消，
+ *    从而实现音画与翻译字幕的精准同步！
+ * 2. **时间戳字幕队列调度**：
+ *    每条由探路器在 `audioStartElapsedMs` 采集生成的字幕，其对应的主画面播放时刻为：
+ *    `displayAtElapsedMs = audioStartElapsedMs + leadSeconds * 1000L`。
+ *    调度器以 100ms 精度轮询队列，到点准时上屏展示，并在持续时长结束后自动淡出清除。
+ */
+@UnstableApi
+class AiSubtitleController(
+    context: Context,
+    private val ownTVPlayer: OwnTVPlayer,
+    private val livePreviewEngine: LivePreviewEngine,
+) {
+    val configStore = AiSubtitleConfigStore(context)
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private val _state = MutableStateFlow<AiSubtitleState>(AiSubtitleState.Off)
+    val state: StateFlow<AiSubtitleState> = _state.asStateFlow()
+
+    private val _activeCue = MutableStateFlow<AiSubtitleCue?>(null)
+    val activeCue: StateFlow<AiSubtitleCue?> = _activeCue.asStateFlow()
+
+    private val pendingCues = ArrayDeque<AiSubtitleCue>()
+
+    private var scout: AiAudioScout? = null
+    private var engine: AiSubtitleEngine? = null
+    private var prepareJob: Job? = null
+    private var cueTickerJob: Job? = null
+    private var activeStreamUrl: String? = null
+    private var pausedMainPlayerForLead = false
+    private var boundPlaybackEngine: PlaybackEngine? = null
+
+    init {
+        scout = AiAudioScout(
+            context = context.applicationContext,
+            onFramePcm = { bytes -> engine?.onFramePcm(bytes) },
+            onSegmentPcm = { chunk -> engine?.onSegmentPcm(chunk) },
+            onScoutError = { err ->
+                Log.w(TAG, "AudioScout error: $err")
+            },
+        )
+    }
+
+    /** 是否已开启 AI 字幕（含准备中与运行中） */
+    val isEnabled: Boolean
+        get() = _state.value !is AiSubtitleState.Off
+
+    /**
+     * 切换 AI 实时字幕开关。
+     * @param playbackEngine 当前全屏/小窗正在播放的引擎
+     * @param fallbackStreamUrl 若从引擎未直接读到 URL 时的备用流地址
+     */
+    fun toggle(playbackEngine: PlaybackEngine, fallbackStreamUrl: String? = null) {
+        if (isEnabled) {
+            stop()
+        } else {
+            start(playbackEngine, fallbackStreamUrl)
+        }
+    }
+
+    /**
+     * 启动 AI 实时字幕与延迟直播流水线。
+     */
+    fun start(playbackEngine: PlaybackEngine, fallbackStreamUrl: String? = null) {
+        val cfg = configStore.config.value
+        if (!cfg.isConfigured) {
+            _state.value = AiSubtitleState.Error("请先在「AI 字幕设置」中配置 API Key 或扫码填入")
+            return
+        }
+
+        val streamUrl = resolveActiveStreamUrl(fallbackStreamUrl)
+        if (streamUrl.isNullOrBlank()) {
+            _state.value = AiSubtitleState.Error("未检测到当前正在播放的直播流地址")
+            return
+        }
+
+        stopInternal(resumeIfPaused = false)
+        boundPlaybackEngine = playbackEngine
+        activeStreamUrl = streamUrl
+
+        // 1. 构建并启动对应的 AI 翻译引擎
+        val newEngine: AiSubtitleEngine = when (cfg.provider) {
+            AiSubtitleProvider.OPENAI_COMPAT -> OpenAiCompatEngine(
+                config = cfg,
+                onCueReady = ::enqueueCue,
+                onEngineStatus = ::onEngineStatusUpdate,
+            )
+            AiSubtitleProvider.OPENAI_REALTIME, AiSubtitleProvider.TVGO -> RealtimeWsEngine(
+                config = cfg,
+                onCueReady = ::enqueueCue,
+                onEngineStatus = ::onEngineStatusUpdate,
+            )
+        }
+        engine = newEngine
+        newEngine.start()
+
+        // 2. 启动后台音频探路器 (AiAudioScout) 超前拉取音频流
+        scout?.start(streamUrl)
+
+        // 3. 启动主画面延迟直播倒计时（暂停主画面 leadSeconds 秒，攒出 AI 识别与翻译时间差）
+        val leadSecs = cfg.leadSeconds.coerceIn(AiSubtitleConfigStore.MIN_LEAD_SECONDS, AiSubtitleConfigStore.MAX_LEAD_SECONDS)
+        prepareJob = scope.launch {
+            if (playbackEngine.isPlaying.value) {
+                runCatching {
+                    playbackEngine.togglePlayPause()
+                    pausedMainPlayerForLead = true
+                }
+            }
+            for (remaining in leadSecs downTo 1) {
+                _state.value = AiSubtitleState.Preparing(
+                    secondsLeft = remaining,
+                    leadSeconds = leadSecs,
+                )
+                delay(1000L)
+            }
+            if (pausedMainPlayerForLead && !playbackEngine.isPlaying.value) {
+                runCatching { playbackEngine.togglePlayPause() }
+            }
+            pausedMainPlayerForLead = false
+            _state.value = AiSubtitleState.Running()
+        }
+
+        // 4. 启动字幕时间戳对齐上屏协程
+        cueTickerJob = scope.launch {
+            while (true) {
+                tickCueDisplay()
+                delay(100L)
+            }
+        }
+    }
+
+    /**
+     * 当用户换台 (Zap) 或流地址变化时调用：若 AI 字幕处于开启状态，自动切换到新频道重新探路与对齐。
+     */
+    fun onStreamChanged(playbackEngine: PlaybackEngine, newStreamUrl: String?) {
+        if (!isEnabled) return
+        if (newStreamUrl.isNullOrBlank()) {
+            stop()
+            return
+        }
+        if (newStreamUrl != activeStreamUrl) {
+            start(playbackEngine, newStreamUrl)
+        }
+    }
+
+    /** 停止 AI 实时字幕并恢复正常播放状态 */
+    fun stop() {
+        stopInternal(resumeIfPaused = true)
+    }
+
+    private fun stopInternal(resumeIfPaused: Boolean) {
+        prepareJob?.cancel()
+        prepareJob = null
+        cueTickerJob?.cancel()
+        cueTickerJob = null
+
+        if (resumeIfPaused && pausedMainPlayerForLead) {
+            val eng = boundPlaybackEngine
+            if (eng != null && !eng.isPlaying.value) {
+                runCatching { eng.togglePlayPause() }
+            }
+        }
+        pausedMainPlayerForLead = false
+        boundPlaybackEngine = null
+        activeStreamUrl = null
+
+        scout?.stop()
+        engine?.stop()
+        engine = null
+
+        synchronized(pendingCues) {
+            pendingCues.clear()
+        }
+        _activeCue.value = null
+        _state.value = AiSubtitleState.Off
+    }
+
+    private fun enqueueCue(cue: AiSubtitleCue) {
+        synchronized(pendingCues) {
+            // 若队列中已有相同 id 的流式增量字幕，原地更新它
+            val idx = pendingCues.indexOfFirst { it.id == cue.id }
+            if (idx >= 0) {
+                val list = pendingCues.toMutableList()
+                list[idx] = cue
+                pendingCues.clear()
+                pendingCues.addAll(list)
+            } else {
+                while (pendingCues.size >= MAX_PENDING_CUES) {
+                    pendingCues.removeFirst()
+                }
+                pendingCues.addLast(cue)
+            }
+        }
+    }
+
+    private fun tickCueDisplay() {
+        val now = SystemClock.elapsedRealtime()
+        val leadMs = configStore.config.value.leadSeconds * 1000L
+
+        // 对于 HTTP 分段引擎（OpenAiCompatEngine），音频块长度为 ~2.6s，请求返回时已天然经过了约 3.5~4.5s；
+        // 我们使用 `audioStartElapsedMs + leadMs` 作为理想上屏时间，若返回时已到点则立即显示。
+        var toShow: AiSubtitleCue? = null
+        synchronized(pendingCues) {
+            val ready = pendingCues.filter { cue ->
+                now >= cue.audioStartElapsedMs + leadMs
+            }
+            if (ready.isNotEmpty()) {
+                val latest = ready.last()
+                toShow = latest
+                // 移除所有早于 latest 的旧字幕
+                while (pendingCues.isNotEmpty() && pendingCues.first().id != latest.id) {
+                    pendingCues.removeFirst()
+                }
+                if (!latest.isPartial) {
+                    pendingCues.removeFirstOrNull()
+                }
+            }
+        }
+
+        if (toShow != null) {
+            _activeCue.value = toShow
+            return
+        }
+
+        // 检查当前屏幕上的字幕是否已超过显示时长（默认显示 5.5 秒后自动消失）
+        val current = _activeCue.value
+        if (current != null) {
+            val shownSince = current.audioStartElapsedMs + leadMs
+            val holdMs = (current.audioDurationMs + 3200L).coerceIn(4000L, 7500L)
+            if (now - shownSince > holdMs) {
+                _activeCue.value = null
+            }
+        }
+    }
+
+    private fun onEngineStatusUpdate(status: String) {
+        val cur = _state.value
+        if (cur is AiSubtitleState.Running) {
+            _state.value = AiSubtitleState.Running(status)
+        }
+    }
+
+    /**
+     * 解析当前正在播放的直播流或视频流 URL：
+     * 优先使用传入的频道 URL，其次读取 `LivePreviewEngine.currentUrl`，最后通过反射或状态读取 `OwnTVPlayer` 的当前 URL。
+     */
+    private fun resolveActiveStreamUrl(fallbackUrl: String?): String? {
+        if (!fallbackUrl.isNullOrBlank()) return fallbackUrl
+        livePreviewEngine.currentUrl?.takeIf { it.isNotBlank() }?.let { return it }
+        ownTVPlayer.currentMediaUrl?.takeIf { it.isNotBlank() }?.let { return it }
+        return null
+    }
+
+    companion object {
+        private const val TAG = "AiSubtitleController"
+        private const val MAX_PENDING_CUES = 20
+    }
+}

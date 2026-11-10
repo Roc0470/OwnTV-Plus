@@ -53,4 +53,6 @@ val playerModule = module {
     // Bridges the playing item to the OpenSubtitles search. Bound here rather than with the rest of
     // the subtitle stack because it takes the player; it follows the engine to :player-core.
     single { tv.own.owntv.core.subtitles.SubtitleController(get(), get(), get(), get()) }
+    // AI 实时字幕与延迟直播控制器（兼容 VsTV 延迟直播 + OpenAI 兼容多模型 & Realtime WebSocket）
+    single { tv.own.owntv.features.aisubtitle.AiSubtitleController(androidContext(), get(), get()) }
 }

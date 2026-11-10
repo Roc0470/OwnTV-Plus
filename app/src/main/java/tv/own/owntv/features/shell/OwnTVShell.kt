@@ -230,6 +230,7 @@ fun OwnTVShell(
     var playlistPillBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
     var miniHasFocus by remember { mutableStateOf(false) }
     val subtitleController = koinInject<tv.own.owntv.core.subtitles.SubtitleController>()
+    val aiSubtitleController = koinInject<tv.own.owntv.features.aisubtitle.AiSubtitleController>()
     val subtitleContext by subtitleController.current.collectAsStateWithLifecycle()
     var showSubtitleSearch by remember { mutableStateOf(false) }
     // Local subtitle-file picker — the same TV-safe in-app browser local M3U import uses.
@@ -629,6 +630,7 @@ fun OwnTVShell(
         liveVm.onFullscreenExited() // no longer full-screen on ExoPlayer → let the preview re-take the engine
         player.stop()
         subtitleController.clear() // leaving the player drops the OpenSubtitles item context
+        aiSubtitleController.stop() // 退出播放器时自动停止 AI 实时字幕与后台音频探路器
         if (selectedSection != MainSection.LIVE_TV) liveVm.clearLiveOnExo()
         // Closing back into a guide: it focuses the channel that was playing (zapped-to included).
         epgVm.playerClosed = selectedSection == MainSection.EPG ||
@@ -1644,14 +1646,31 @@ fun OwnTVShell(
             // Direct render mode: mpv can't draw subtitles on the decoder-owned surface — the app does.
             // Also drawn docked: the mini-player is a real watching mode for a subtitled film, and
             // dropping the only line of dialogue there made subtitles look broken. Scaled to the box.
+            val overlayScale = if (isFull) 1f else {
+                (tv.own.owntv.core.player.MiniPlayerSize.fraction(miniSizePct) * 1.5f).coerceIn(0.35f, 0.7f)
+            }
             if (!liveOnExo && !inPip) {
                 tv.own.owntv.player.SubtitleOverlay(
                     player = player, modifier = Modifier.fillMaxSize(),
                     // Tied to the chosen mini size, but nudged up and floored: a strictly proportional
                     // line would be unreadable in the smallest box.
-                    sizeScale = if (isFull) 1f else {
-                        (tv.own.owntv.core.player.MiniPlayerSize.fraction(miniSizePct) * 1.5f).coerceIn(0.35f, 0.7f)
-                    },
+                    sizeScale = overlayScale,
+                )
+            }
+            // AI 实时字幕与延迟直播叠加层（同时支持 ExoPlayer 直播流与 MPV 播放器）
+            if (!inPip) {
+                val aiSubController = koinInject<tv.own.owntv.features.aisubtitle.AiSubtitleController>()
+                val activePlaybackEngine = if (liveOnExo) liveVm.previewEngine else mpvEngine
+                val currentChannelUrl = previewChannel?.streamUrl
+                LaunchedEffect(previewChannel?.id, liveOnExo) {
+                    if (aiSubController.isEnabled && currentChannelUrl != null) {
+                        aiSubController.onStreamChanged(activePlaybackEngine, currentChannelUrl)
+                    }
+                }
+                tv.own.owntv.features.aisubtitle.AiSubtitleOverlay(
+                    modifier = Modifier.fillMaxSize(),
+                    sizeScale = overlayScale,
+                    controller = aiSubController,
                 )
             }
             // The switch for what is on screen: Live TV's for a channel, films and series' otherwise.

@@ -3,4 +3,8 @@
     <string name="content_search_channels">搜索频道…</string>
     <string name="content_search_movies">搜索电影…</string>
     <string name="content_search_series">搜索剧集…</string>
+    <string name="player_ai_subtitle_section">AI 实时翻译字幕</string>
+    <string name="player_ai_subtitle_toggle_on">开启 AI 实时字幕（延迟直播同步）</string>
+    <string name="player_ai_subtitle_toggle_off">关闭 AI 实时字幕</string>
+    <string name="player_ai_subtitle_settings">AI 字幕与多模型设置（支持手机扫码）…</string>
 </resources>

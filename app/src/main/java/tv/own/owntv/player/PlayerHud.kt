@@ -93,7 +93,7 @@ private const val TRACK_POLL_TRIES = 20
  *  Counted from the stall, which itself only starts once the buffer (~10s) has run dry. */
 private const val RECONNECT_NOTICE_AFTER_MS = 10_000L
 
-internal enum class HudDialog { NONE, AUDIO, SUBS, SPEED, ZOOM, QUALITY, VOLUME, JUMP_BACK, SLEEP_TIMER, SOURCES }
+internal enum class HudDialog { NONE, AUDIO, SUBS, SPEED, ZOOM, QUALITY, VOLUME, JUMP_BACK, SLEEP_TIMER, SOURCES, AI_SUBS }
 
 /**
  * "Sources": the other versions of the live channel playing ([tv.own.owntv.core.live.ChannelVersions]).
@@ -929,6 +929,10 @@ fun PlayerHud(
                 }
             }
             val subDelay by player.subDelayMs.collectAsStateWithLifecycle()
+            val aiSubController = org.koin.compose.koinInject<tv.own.owntv.features.aisubtitle.AiSubtitleController>()
+            val aiSubState by aiSubController.state.collectAsStateWithLifecycle()
+            val aiSubEnabled = aiSubState !is tv.own.owntv.features.aisubtitle.AiSubtitleState.Off
+            val aiSubConfigured = aiSubController.configStore.config.collectAsStateWithLifecycle().value.isConfigured
             TrackDialog(
                 stringResource(R.string.player_subtitles), subTracks,
                 onSelect = { player.selectSubtitle(it.mpvId); dialog = HudDialog.NONE },
@@ -941,6 +945,22 @@ fun PlayerHud(
                 subDelayMs = subDelay,
                 onAdjustSubDelay = if (player.subtitleTimingAvailable()) player::adjustSubtitleDelay else null,
                 onResetSubDelay = player::resetSubtitleDelay,
+                aiSubtitleEnabled = aiSubEnabled,
+                onToggleAiSubtitle = {
+                    if (!aiSubEnabled && !aiSubConfigured) {
+                        dialog = HudDialog.AI_SUBS
+                    } else {
+                        aiSubController.toggle(player)
+                        dialog = HudDialog.NONE
+                    }
+                },
+                onOpenAiSubtitleSettings = { dialog = HudDialog.AI_SUBS },
+            )
+        }
+        HudDialog.AI_SUBS -> {
+            tv.own.owntv.features.aisubtitle.AiSubtitleSettingsDialog(
+                player = player,
+                onDismiss = { dialog = HudDialog.NONE },
             )
         }
         HudDialog.SPEED -> SpeedDialog(current = speed, onSelect = { player.setSpeed(it); dialog = HudDialog.NONE }, onDismiss = { dialog = HudDialog.NONE })
