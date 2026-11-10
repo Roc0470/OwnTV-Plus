@@ -42,6 +42,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -151,41 +152,46 @@ fun AiSubtitleOverlay(
             else -> Unit
         }
 
-        // 2. 实时双语/中文翻译字幕卡片（底部居中）
+        // 2. 实时双语/中文翻译短句子卡片（底部居中，最多两行，随句切换）
         val active = cue
         if (active != null && (active.translatedText.isNotBlank() || active.originalText.isNotBlank())) {
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .widthIn(max = 1120.dp * sizeScale)
+                    .padding(bottom = 26.dp * sizeScale)
+                    .widthIn(max = 1080.dp * sizeScale)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color.Black.copy(alpha = 0.68f))
-                    .padding(horizontal = 22.dp * sizeScale, vertical = 10.dp * sizeScale),
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .padding(horizontal = 22.dp * sizeScale, vertical = 9.dp * sizeScale),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 if (config.showOriginal && active.originalText.isNotBlank()) {
                     Text(
                         text = active.originalText,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                         textAlign = TextAlign.Center,
                         style = TextStyle(
                             color = Color(0xFF99F6E4),
-                            fontSize = (18f * scale).sp,
-                            lineHeight = (23f * scale).sp,
+                            fontSize = (17.5f * scale).sp,
+                            lineHeight = (22f * scale).sp,
                             fontFamily = FontFamily.SansSerif,
                             fontWeight = FontWeight.Normal,
                             shadow = Shadow(color = Color.Black, offset = Offset(0f, 1.5f), blurRadius = 4f),
                         ),
                     )
-                    Spacer(Modifier.height(4.dp * sizeScale))
+                    Spacer(Modifier.height(3.dp * sizeScale))
                 }
                 if (active.translatedText.isNotBlank()) {
                     Text(
                         text = active.translatedText,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                         textAlign = TextAlign.Center,
                         style = TextStyle(
                             color = Color.White,
-                            fontSize = (25f * scale).sp,
-                            lineHeight = (31f * scale).sp,
+                            fontSize = (24f * scale).sp,
+                            lineHeight = (30f * scale).sp,
                             fontFamily = FontFamily.SansSerif,
                             fontWeight = FontWeight.SemiBold,
                             shadow = Shadow(color = Color.Black, offset = Offset(0f, 2f), blurRadius = 6f),

@@ -277,10 +277,10 @@ class AiSubtitleController(
             return
         }
 
-        // 检查当前屏幕上的字幕是否已超过显示时长（文本停留 4.5~6 秒后平滑消失）
+        // 检查当前屏幕上的字幕是否已超过显示时长（停顿或静音后停留 2.8 秒平滑消隐，避免屏幕留存过期短句）
         val current = _activeCue.value
         if (current != null) {
-            val holdMs = (current.audioDurationMs + 2000L).coerceIn(4000L, 7000L)
+            val holdMs = 2800L
             if (now - lastCueDisplayElapsedMs > holdMs) {
                 _activeCue.value = null
             }

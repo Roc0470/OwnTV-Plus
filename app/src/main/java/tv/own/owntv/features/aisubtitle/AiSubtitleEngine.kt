@@ -567,13 +567,20 @@ class RealtimeWsEngine(
                     } else {
                         SystemClock.elapsedRealtime()
                     }
-                    activeCueId = "rt-${cueCounter.getAndIncrement()}"
-                    partialOriginal.setLength(0)
-                    partialTranslated.setLength(0)
+                    finalizeCurrentSentence()
+                }
+                "conversation.item.created", "response.created" -> {
+                    // 当新的一轮推理或新对话项生成时，如果上一句已有翻译内容，先平滑结算定稿
+                    if (partialTranslated.isNotEmpty() || partialOriginal.isNotEmpty()) {
+                        finalizeCurrentSentence()
+                    }
                 }
                 "conversation.item.input_audio_transcription.delta" -> {
                     val delta = evt.optString("delta", "")
                     if (delta.isNotEmpty()) {
+                        if (shouldSplitSentence(partialTranslated.toString(), partialOriginal.toString())) {
+                            finalizeCurrentSentence()
+                        }
                         partialOriginal.append(delta)
                         emitCurrentCue(isPartial = true)
                     }
@@ -589,22 +596,24 @@ class RealtimeWsEngine(
                 "response.text.delta", "response.audio_transcript.delta", "response.output_text.delta" -> {
                     val delta = evt.optString("delta", "")
                     if (delta.isNotEmpty()) {
+                        // 智能断句：如果前文已经以句末标点（。！？.?!）结尾，新到 delta 为新一句话的开始，立即切句
+                        if (shouldSplitSentence(partialTranslated.toString(), partialOriginal.toString())) {
+                            finalizeCurrentSentence()
+                        }
                         partialTranslated.append(delta)
                         emitCurrentCue(isPartial = true)
                     }
                 }
-                "response.text.done", "response.audio_transcript.done", "response.output_text.done", "response.done" -> {
+                "response.inference_unit_finished", "response.output_item.done", "response.content_part.done",
+                "response.text.done", "response.audio_transcript.done", "response.output_text.done",
+                "response.done", "input_audio_buffer.speech_stopped" -> {
                     val fullText = evt.optString("text", "").ifBlank { evt.optString("transcript", "") }
                     if (fullText.isNotBlank()) {
                         partialTranslated.setLength(0)
                         partialTranslated.append(fullText.trim())
                     }
                     if (partialTranslated.isNotEmpty() || partialOriginal.isNotEmpty()) {
-                        emitCurrentCue(isPartial = false)
-                        partialOriginal.setLength(0)
-                        partialTranslated.setLength(0)
-                        activeCueId = "rt-${cueCounter.getAndIncrement()}"
-                        currentSpeechStartElapsedMs = SystemClock.elapsedRealtime()
+                        finalizeCurrentSentence()
                     }
                 }
                 "error" -> {
@@ -622,6 +631,68 @@ class RealtimeWsEngine(
         }
     }
 
+    /**
+     * 智能断句判断：
+     * 1. 中文译文末尾有明确句末标点（。！？；），且已有至少 6 个字符；
+     * 2. 英文原文末尾有 . ! ? 且非英文常见缩写（如 Mr. U.S.）；
+     * 3. 超长句子保护：中文连续超过 26 个字符且遇逗号（，,）时分句，确保单屏绝不超过 2 行。
+     */
+    private fun shouldSplitSentence(transText: String, origText: String): Boolean {
+        val trans = transText.trimEnd()
+        if (trans.length >= 6) {
+            val lastChar = trans.last()
+            if (lastChar == '。' || lastChar == '！' || lastChar == '？' || lastChar == '；') {
+                return true
+            }
+        }
+        val orig = origText.trimEnd()
+        if (orig.length >= 15) {
+            val lastChar = orig.last()
+            if (lastChar == '!' || lastChar == '?') {
+                return true
+            }
+            if (lastChar == '.') {
+                val words = orig.split(' ')
+                val lastWord = words.lastOrNull().orEmpty().lowercase()
+                val isAbbr = lastWord in listOf("mr.", "ms.", "mrs.", "dr.", "u.s.", "u.k.", "e.g.", "i.e.", "vs.", "inc.", "ltd.")
+                if (!isAbbr) {
+                    return true
+                }
+            }
+        }
+        if (trans.length >= 26) {
+            val lastChar = trans.last()
+            if (lastChar == '，' || lastChar == ',') {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * 将当前累积的短句定稿发送至上屏队列，并安全重置缓冲区准备接收下一个短句。
+     */
+    private fun finalizeCurrentSentence() {
+        val orig = if (config.showOriginal) partialOriginal.toString().trim() else ""
+        val trans = partialTranslated.toString().trim()
+        if (orig.isNotEmpty() || trans.isNotEmpty()) {
+            onCueReady(
+                AiSubtitleCue(
+                    id = activeCueId,
+                    originalText = orig,
+                    translatedText = trans.ifEmpty { "…" },
+                    audioStartElapsedMs = currentSpeechStartElapsedMs,
+                    audioDurationMs = 2800L,
+                    isPartial = false,
+                ),
+            )
+        }
+        partialOriginal.setLength(0)
+        partialTranslated.setLength(0)
+        activeCueId = "rt-${cueCounter.getAndIncrement()}"
+        currentSpeechStartElapsedMs = SystemClock.elapsedRealtime()
+    }
+
     private fun emitCurrentCue(isPartial: Boolean) {
         val orig = if (config.showOriginal) partialOriginal.toString().trim() else ""
         val trans = partialTranslated.toString().trim()
@@ -633,7 +704,7 @@ class RealtimeWsEngine(
                 originalText = orig,
                 translatedText = trans.ifEmpty { "…" },
                 audioStartElapsedMs = currentSpeechStartElapsedMs,
-                audioDurationMs = 3500L,
+                audioDurationMs = 2800L,
                 isPartial = isPartial,
             ),
         )
