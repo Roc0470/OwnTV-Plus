@@ -465,7 +465,8 @@ class RealtimeWsEngine(
         if (config.apiKey.isNotBlank()) {
             reqBuilder.header("Authorization", "Bearer ${config.apiKey.trim()}")
         }
-        if (config.bailianWorkspace.isNotBlank()) {
+        val isKeyWithWs = config.apiKey.trim().startsWith("sk-ws-")
+        if (config.bailianWorkspace.isNotBlank() && !isKeyWithWs) {
             reqBuilder.header("X-DashScope-WorkSpace", config.bailianWorkspace.trim())
         }
         if (config.provider == AiSubtitleProvider.OPENAI_REALTIME) {
@@ -509,9 +510,8 @@ class RealtimeWsEngine(
      */
     private fun sendSessionUpdate(ws: WebSocket) {
         val sessionObj = JSONObject().apply {
-            put("modalities", JSONArray().put("text"))
             put("output_modalities", JSONArray().put("text"))
-            put("voice", JSONObject.NULL) // 必须显式置空，防止百炼报错 'Voice is not supported'
+            put("voice", "Tina") // 百炼 LiveTranslate 官方默认 preset 音色
             put(
                 "translation",
                 JSONObject().apply {

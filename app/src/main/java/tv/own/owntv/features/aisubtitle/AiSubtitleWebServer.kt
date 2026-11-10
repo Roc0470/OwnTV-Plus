@@ -217,7 +217,8 @@ class AiSubtitleWebServer(
             if (key.isNotBlank()) {
                 reqBuilder.header("Authorization", "Bearer $key")
             }
-            if (wsId.isNotBlank()) {
+            val isKeyWithWs = key.trim().startsWith("sk-ws-")
+            if (wsId.isNotBlank() && !isKeyWithWs) {
                 reqBuilder.header("X-DashScope-WorkSpace", wsId.trim())
             }
             if (provider == AiSubtitleProvider.OPENAI_REALTIME) {
@@ -250,9 +251,8 @@ class AiSubtitleWebServer(
                                     put(
                                         "session",
                                         JSONObject().apply {
-                                            put("modalities", JSONArray().put("text"))
                                             put("output_modalities", JSONArray().put("text"))
-                                            put("voice", JSONObject.NULL)
+                                            put("voice", "Tina")
                                             put("translation", JSONObject().apply { put("language", "zh") })
                                         },
                                     )
