@@ -219,6 +219,16 @@ class AiSubtitleController(
     }
 
     private fun enqueueCue(cue: AiSubtitleCue) {
+        val now = SystemClock.elapsedRealtime()
+        val leadMs = configStore.config.value.leadSeconds * 1000L
+        val isRunning = _state.value is AiSubtitleState.Running
+
+        // 在 Realtime / 流式模式下，若已进入延迟播放运行态且已到达或越过对应对齐时刻，直接实时上屏逐字渲染
+        if (isRunning && now >= cue.audioStartElapsedMs + leadMs) {
+            _activeCue.value = cue
+            lastCueDisplayElapsedMs = now
+        }
+
         synchronized(pendingCues) {
             // 若队列中已有相同 id 的流式增量字幕，原地更新它
             val idx = pendingCues.indexOfFirst { it.id == cue.id }
@@ -236,12 +246,12 @@ class AiSubtitleController(
         }
     }
 
+    private var lastCueDisplayElapsedMs = 0L
+
     private fun tickCueDisplay() {
         val now = SystemClock.elapsedRealtime()
         val leadMs = configStore.config.value.leadSeconds * 1000L
 
-        // 对于 HTTP 分段引擎（OpenAiCompatEngine），音频块长度为 ~2.6s，请求返回时已天然经过了约 3.5~4.5s；
-        // 我们使用 `audioStartElapsedMs + leadMs` 作为理想上屏时间，若返回时已到点则立即显示。
         var toShow: AiSubtitleCue? = null
         synchronized(pendingCues) {
             val ready = pendingCues.filter { cue ->
@@ -250,10 +260,11 @@ class AiSubtitleController(
             if (ready.isNotEmpty()) {
                 val latest = ready.last()
                 toShow = latest
-                // 移除所有早于 latest 的旧字幕
+                // 仅淘汰比当前展示字幕更旧的旧句子
                 while (pendingCues.isNotEmpty() && pendingCues.first().id != latest.id) {
                     pendingCues.removeFirst()
                 }
+                // 若该句已定稿完成，从待展示队列移除，移交屏幕驻留计时器接管
                 if (!latest.isPartial) {
                     pendingCues.removeFirstOrNull()
                 }
@@ -262,15 +273,15 @@ class AiSubtitleController(
 
         if (toShow != null) {
             _activeCue.value = toShow
+            lastCueDisplayElapsedMs = now
             return
         }
 
-        // 检查当前屏幕上的字幕是否已超过显示时长（默认显示 5.5 秒后自动消失）
+        // 检查当前屏幕上的字幕是否已超过显示时长（文本停留 4.5~6 秒后平滑消失）
         val current = _activeCue.value
         if (current != null) {
-            val shownSince = current.audioStartElapsedMs + leadMs
-            val holdMs = (current.audioDurationMs + 3200L).coerceIn(4000L, 7500L)
-            if (now - shownSince > holdMs) {
+            val holdMs = (current.audioDurationMs + 2000L).coerceIn(4000L, 7000L)
+            if (now - lastCueDisplayElapsedMs > holdMs) {
                 _activeCue.value = null
             }
         }
@@ -285,9 +296,10 @@ class AiSubtitleController(
 
     /**
      * 解析当前正在播放的直播流或视频流 URL：
-     * 优先使用传入的频道 URL，其次读取 `LivePreviewEngine.currentUrl`，最后通过反射或状态读取 `OwnTVPlayer` 的当前 URL。
+     * 优先使用传入的频道 URL，其次读取 `LivePreviewEngine.currentUrl`，最后读取 `OwnTVPlayer` 的当前 URL。
      */
     private fun resolveActiveStreamUrl(fallbackUrl: String?): String? {
+        Log.i(TAG, "resolveActiveStreamUrl: fallback=$fallbackUrl, preview=${livePreviewEngine.currentUrl}, ownTVPlayer=${ownTVPlayer.currentMediaUrl}")
         if (!fallbackUrl.isNullOrBlank()) return fallbackUrl
         livePreviewEngine.currentUrl?.takeIf { it.isNotBlank() }?.let { return it }
         ownTVPlayer.currentMediaUrl?.takeIf { it.isNotBlank() }?.let { return it }

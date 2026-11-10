@@ -110,7 +110,9 @@ class Pcm16kAudioProcessor(
 
     private var inSampleRate = 48000
     private var inChannels = 2
+    private var inEncoding = C.ENCODING_PCM_16BIT
     private var resamplePos = 0.0
+    private var totalFramesSent = 0L
 
     // 100ms 实时流式帧缓冲 (16000Hz * 2 bytes * 0.1s = 3200 bytes)
     private val frameBuffer = ByteArrayOutputStream(6400)
@@ -123,12 +125,16 @@ class Pcm16kAudioProcessor(
     private var trailingSilentSamples = 0
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
+        val enc = inputAudioFormat.encoding
+        if (enc != C.ENCODING_PCM_16BIT && enc != C.ENCODING_PCM_FLOAT) {
+            Log.w(TAG, "Pcm16kAudioProcessor: unsupported encoding=$enc")
             return AudioProcessor.AudioFormat.NOT_SET
         }
         inSampleRate = inputAudioFormat.sampleRate.coerceAtLeast(8000)
         inChannels = inputAudioFormat.channelCount.coerceIn(1, 8)
+        inEncoding = enc
         resamplePos = 0.0
+        Log.i(TAG, "Pcm16kAudioProcessor configured: sampleRate=$inSampleRate, channels=$inChannels, encoding=$inEncoding")
         return inputAudioFormat
     }
 
@@ -145,6 +151,7 @@ class Pcm16kAudioProcessor(
             segmentSumSquares = 0.0
             segmentSampleCount = 0
             trailingSilentSamples = 0
+            totalFramesSent = 0L
         }
     }
 
@@ -152,26 +159,40 @@ class Pcm16kAudioProcessor(
         val remaining = inputBuffer.remaining()
         if (remaining == 0) return
 
-        // 读取输入样本并把下游输出替换为全 0 静音（保持 AudioSink 时钟正常推进但绝不发声）
-        val frameSize = inChannels * 2
+        val bytesPerSample = if (inEncoding == C.ENCODING_PCM_FLOAT) 4 else 2
+        val frameSize = inChannels * bytesPerSample
         val inFrames = remaining / frameSize
         if (inFrames <= 0) {
             inputBuffer.position(inputBuffer.limit())
             return
         }
 
-        val src = inputBuffer.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val monoIn = FloatArray(inFrames)
-        for (f in 0 until inFrames) {
-            var sum = 0f
-            val baseIdx = f * inChannels
-            for (c in 0 until inChannels) {
-                sum += src.get(baseIdx + c).toFloat()
+        val leBuffer = inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+
+        if (inEncoding == C.ENCODING_PCM_FLOAT) {
+            val srcFloat = leBuffer.asFloatBuffer()
+            for (f in 0 until inFrames) {
+                var sum = 0f
+                val baseIdx = f * inChannels
+                for (c in 0 until inChannels) {
+                    sum += srcFloat.get(baseIdx + c)
+                }
+                monoIn[f] = (sum / inChannels).coerceIn(-1.0f, 1.0f) * 32767f
             }
-            monoIn[f] = sum / inChannels
+        } else {
+            val srcShort = leBuffer.asShortBuffer()
+            for (f in 0 until inFrames) {
+                var sum = 0f
+                val baseIdx = f * inChannels
+                for (c in 0 until inChannels) {
+                    sum += srcShort.get(baseIdx + c).toFloat()
+                }
+                monoIn[f] = sum / inChannels
+            }
         }
 
-        // 消耗输入 Buffer 并向下游写入等长全 0 字节（静音）
+        // 消耗输入 Buffer 并向下游写入等长全 0 字节（静音，保持 AudioSink 推进）
         val consumedBytes = inFrames * frameSize
         inputBuffer.position(inputBuffer.position() + consumedBytes)
         val silentOut = replaceOutputBuffer(consumedBytes)
@@ -227,6 +248,10 @@ class Pcm16kAudioProcessor(
             if (frameBuffer.size() >= FRAME_BYTES_100MS) {
                 readyFrame = frameBuffer.toByteArray()
                 frameBuffer.reset()
+                totalFramesSent++
+                if (totalFramesSent % 30L == 0L) {
+                    Log.d(TAG, "AudioScout streamed ${totalFramesSent * 100 / 1000}s PCM audio to AI engine")
+                }
             }
 
             // 分段切分策略：
@@ -382,12 +407,25 @@ class AiAudioScout(
                     .setLoadControl(loadControl)
                     .build()
 
+                // 静音探路播放器，并禁用画面与字幕解码
+                player.volume = 0f
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                     .build()
 
                 player.addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        val stateName = when (playbackState) {
+                            Player.STATE_IDLE -> "STATE_IDLE"
+                            Player.STATE_BUFFERING -> "STATE_BUFFERING"
+                            Player.STATE_READY -> "STATE_READY"
+                            Player.STATE_ENDED -> "STATE_ENDED"
+                            else -> "UNKNOWN($playbackState)"
+                        }
+                        Log.i(TAG, "AiAudioScout playbackState: $stateName, isPlaying=${player.isPlaying}")
+                    }
+
                     override fun onPlayerError(error: PlaybackException) {
                         Log.w(TAG, "AiAudioScout error: ${error.errorCodeName} - ${error.message}")
                         // 直播流瞬时波动自动重连一次
@@ -407,6 +445,7 @@ class AiAudioScout(
                     }
                 })
 
+                Log.i(TAG, "AiAudioScout preparing stream: $url")
                 player.setMediaItem(MediaItem.fromUri(url))
                 player.prepare()
                 player.playWhenReady = true

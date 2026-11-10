@@ -413,6 +413,7 @@ class RealtimeWsEngine(
 ) : AiSubtitleEngine {
 
     private val running = AtomicBoolean(false)
+    private val sessionConfigured = AtomicBoolean(false)
     private var webSocket: WebSocket? = null
     private var sessionStartElapsedMs = 0L
     private var currentSpeechStartElapsedMs = 0L
@@ -432,6 +433,7 @@ class RealtimeWsEngine(
 
     override fun start() {
         running.set(true)
+        sessionConfigured.set(false)
         sessionStartElapsedMs = SystemClock.elapsedRealtime()
         currentSpeechStartElapsedMs = sessionStartElapsedMs
         connectWebSocket()
@@ -463,6 +465,7 @@ class RealtimeWsEngine(
 
     private fun connectWebSocket() {
         val url = buildWsUrl()
+        Log.i(TAG, "Connecting Realtime WebSocket: $url")
         val reqBuilder = Request.Builder().url(url)
         if (config.apiKey.isNotBlank()) {
             reqBuilder.header("Authorization", "Bearer ${config.apiKey.trim()}")
@@ -476,8 +479,13 @@ class RealtimeWsEngine(
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     sessionStartElapsedMs = SystemClock.elapsedRealtime()
-                    onEngineStatus("Realtime 实时语音流已连接")
-                    sendSessionUpdate(webSocket)
+                    Log.i(TAG, "Realtime WebSocket connected. Awaiting session.created...")
+                    onEngineStatus("Realtime 连接成功，正在初始化会话...")
+                    if (config.provider == AiSubtitleProvider.TVGO) {
+                        // TVGO 协议连上即就绪
+                        sessionConfigured.set(true)
+                        onEngineStatus("TVGO 实时字幕流已就绪")
+                    }
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -485,15 +493,21 @@ class RealtimeWsEngine(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    Log.w(TAG, "Realtime WebSocket failure: ${t.message}")
+                    Log.w(TAG, "Realtime WebSocket failure: ${t.message}", t)
+                    sessionConfigured.set(false)
                     onEngineStatus("连接中断: ${t.message ?: "网络异常"}")
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    Log.i(TAG, "Realtime WebSocket closed: code=$code, reason=$reason")
+                    sessionConfigured.set(false)
                 }
             },
         )
     }
 
     /**
-     * 发送与 VsTV `Lr3/f` 完全一致的 `session.update` 握手包
+     * 发送 session.update 会话配置包（收到 session.created 后调用且仅调用一次）
      */
     private fun sendSessionUpdate(ws: WebSocket) {
         val sessionObj = JSONObject().apply {
@@ -517,11 +531,12 @@ class RealtimeWsEngine(
             put("type", "session.update")
             put("session", sessionObj)
         }
+        Log.i(TAG, "Sending session.update: $root")
         ws.send(root.toString())
     }
 
     override fun onFramePcm(pcm16k: ByteArray) {
-        if (!running.get()) return
+        if (!running.get() || !sessionConfigured.get()) return
         val ws = webSocket ?: return
         val b64 = Base64.encodeToString(pcm16k, Base64.NO_WRAP)
         val msg = JSONObject().apply {
@@ -537,7 +552,13 @@ class RealtimeWsEngine(
             val type = evt.optString("type", "")
             when (type) {
                 "session.created" -> {
+                    Log.i(TAG, "Received session.created. Sending session.update...")
                     webSocket?.let { sendSessionUpdate(it) }
+                }
+                "session.updated" -> {
+                    Log.i(TAG, "Received session.updated. Session configured successfully!")
+                    sessionConfigured.set(true)
+                    onEngineStatus("AI 实时同传已就绪 (${config.modelName})")
                 }
                 "input_audio_buffer.speech_started" -> {
                     val audioStartMs = evt.optLong("audio_start_ms", -1L)
@@ -588,9 +609,16 @@ class RealtimeWsEngine(
                 }
                 "error" -> {
                     val errMsg = evt.optJSONObject("error")?.optString("message") ?: evt.optString("message", "未知错误")
-                    Log.w(TAG, "Realtime server error: $errMsg")
+                    Log.w(TAG, "Realtime server error: $errMsg (raw: $rawJson)")
+                    onEngineStatus("服务端错误: $errMsg")
+                }
+                else -> {
+                    // 其他心跳或上下文事件，仅调试记录
+                    Log.v(TAG, "Unhandled server event: $type")
                 }
             }
+        }.onFailure { err ->
+            Log.e(TAG, "Failed to parse server event: $rawJson", err)
         }
     }
 
@@ -613,6 +641,7 @@ class RealtimeWsEngine(
 
     override fun stop() {
         running.set(false)
+        sessionConfigured.set(false)
         webSocket?.runCatching { close(1000, "Stopped by user") }
         webSocket = null
     }
