@@ -120,6 +120,7 @@ private sealed interface TuneOsd {
 @Composable
 fun PlayerHud(
     player: PlaybackEngine,
+    streamUrl: String? = null,
     onBack: () -> Unit,
     onPip: (() -> Unit)? = null,
     // Switch to audio-only mode (stops video decode, surfaces the top-bar now-playing bar). Null hides it.
@@ -950,7 +951,7 @@ fun PlayerHud(
                     if (!aiSubEnabled && !aiSubConfigured) {
                         dialog = HudDialog.AI_SUBS
                     } else {
-                        aiSubController.toggle(player)
+                        aiSubController.toggle(player, fallbackStreamUrl = streamUrl)
                         dialog = HudDialog.NONE
                     }
                 },
@@ -960,6 +961,7 @@ fun PlayerHud(
         HudDialog.AI_SUBS -> {
             tv.own.owntv.features.aisubtitle.AiSubtitleSettingsDialog(
                 player = player,
+                fallbackStreamUrl = streamUrl,
                 onDismiss = { dialog = HudDialog.NONE },
             )
         }

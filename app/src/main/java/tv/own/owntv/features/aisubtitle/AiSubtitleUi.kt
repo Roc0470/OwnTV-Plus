@@ -212,6 +212,7 @@ fun AiSubtitleOverlay(
 @Composable
 fun AiSubtitleSettingsDialog(
     player: PlaybackEngine,
+    fallbackStreamUrl: String? = null,
     onDismiss: () -> Unit,
     controller: AiSubtitleController = koinInject(),
 ) {
@@ -289,7 +290,7 @@ fun AiSubtitleSettingsDialog(
                         if (!config.isConfigured && !isRunning) {
                             showQrPanel = true
                         } else {
-                            controller.toggle(player)
+                            controller.toggle(player, fallbackStreamUrl = fallbackStreamUrl)
                         }
                     },
                 )

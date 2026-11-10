@@ -111,7 +111,7 @@ class AiSubtitleController(
             return
         }
 
-        val streamUrl = resolveActiveStreamUrl(fallbackStreamUrl)
+        val streamUrl = resolveActiveStreamUrl(fallbackStreamUrl, playbackEngine)
         if (streamUrl.isNullOrBlank()) {
             _state.value = AiSubtitleState.Error("未检测到当前正在播放的直播流地址")
             return
@@ -296,11 +296,13 @@ class AiSubtitleController(
 
     /**
      * 解析当前正在播放的直播流或视频流 URL：
-     * 优先使用传入的频道 URL，其次读取 `LivePreviewEngine.currentUrl`，最后读取 `OwnTVPlayer` 的当前 URL。
+     * 优先使用传入的频道 URL，其次从传入的 PlaybackEngine 获取，最后回退读取 `LivePreviewEngine.currentUrl` 与 `OwnTVPlayer`。
      */
-    private fun resolveActiveStreamUrl(fallbackUrl: String?): String? {
-        Log.i(TAG, "resolveActiveStreamUrl: fallback=$fallbackUrl, preview=${livePreviewEngine.currentUrl}, ownTVPlayer=${ownTVPlayer.currentMediaUrl}")
+    private fun resolveActiveStreamUrl(fallbackUrl: String?, playbackEngine: PlaybackEngine? = null): String? {
+        val engUrl = (playbackEngine as? LivePreviewEngine)?.currentUrl
+        Log.i(TAG, "resolveActiveStreamUrl: fallback=$fallbackUrl, engUrl=$engUrl, preview=${livePreviewEngine.currentUrl}, ownTVPlayer=${ownTVPlayer.currentMediaUrl}")
         if (!fallbackUrl.isNullOrBlank()) return fallbackUrl
+        engUrl?.takeIf { it.isNotBlank() }?.let { return it }
         livePreviewEngine.currentUrl?.takeIf { it.isNotBlank() }?.let { return it }
         ownTVPlayer.currentMediaUrl?.takeIf { it.isNotBlank() }?.let { return it }
         return null

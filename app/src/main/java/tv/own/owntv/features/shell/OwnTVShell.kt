@@ -1743,6 +1743,7 @@ fun OwnTVShell(
                 }
                 PlayerHud(
                     player = if (liveOnExo) liveVm.previewEngine else mpvEngine, // HUD drives the active engine
+                    streamUrl = previewChannel?.streamUrl ?: player.currentMediaUrl,
                     onBack = exitPlayer,
                     onPip = dockPlayer, // PiP/dock works for live on either engine now
                     onAudioMode = toAudioMode,
