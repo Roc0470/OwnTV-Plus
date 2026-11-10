@@ -20,8 +20,9 @@ local.properties
 CLAUDE.md
 AGENT_HANDOVER.md
 
-# Signing keys & secrets — NEVER commit these
+# Signing keys & secrets — NEVER commit these (except public dev keystore for consistent CI signatures)
 *.keystore
+!keystore/owntv_dev.keystore
 *.jks
 keystore.properties
 signing.properties

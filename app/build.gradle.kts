@@ -134,14 +134,22 @@ android {
             ?: providers.gradleProperty(property).orNull
             ?: localSigningProps.getProperty(property)
 
+    val defaultKeystore = rootProject.file("keystore/owntv_dev.keystore")
+    val hasDefaultKeystore = defaultKeystore.exists()
+
     val releaseKeystore = signingValue("KEYSTORE_FILE", "owntv.keystoreFile")
+        ?: (if (hasDefaultKeystore) defaultKeystore.absolutePath else null)
+    val keystorePassword = signingValue("KEYSTORE_PASSWORD", "owntv.keystorePassword") ?: "owntv123456"
+    val keyAliasVal = signingValue("KEY_ALIAS", "owntv.keyAlias") ?: "owntv"
+    val keyPasswordVal = signingValue("KEY_PASSWORD", "owntv.keyPassword") ?: "owntv123456"
+
     signingConfigs {
         if (releaseKeystore != null) {
             create("release") {
                 storeFile = file(releaseKeystore)
-                storePassword = signingValue("KEYSTORE_PASSWORD", "owntv.keystorePassword")
-                keyAlias = signingValue("KEY_ALIAS", "owntv.keyAlias")
-                keyPassword = signingValue("KEY_PASSWORD", "owntv.keyPassword")
+                storePassword = keystorePassword
+                keyAlias = keyAliasVal
+                keyPassword = keyPasswordVal
             }
         }
     }
@@ -160,6 +168,9 @@ android {
             // block at the bottom of this file (see docs/internationalization.md 0b, "Pseudolocales must
             // survive the filter").
             isPseudoLocalesEnabled = true
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         release {
             // Stable AGP release optimization API. Keep both code and resource shrinking enabled;
