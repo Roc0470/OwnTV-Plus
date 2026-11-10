@@ -25,8 +25,8 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import okhttp3.OkHttpClient
 import tv.own.owntv.player.StereoDownmix
-import tv.own.owntv.player.ffmpeg.FfmpegAudio
 import tv.own.owntv.player.ffmpeg.FfmpegAudioRenderer
+import tv.own.owntv.player.ffmpeg.FfmpegLibrary
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -358,7 +358,7 @@ class AiAudioScout(
                             eventListener,
                             out,
                         )
-                        if (FfmpegAudio.available) {
+                        if (FfmpegLibrary.isAvailable()) {
                             out.add(FfmpegAudioRenderer(eventHandler, eventListener, audioSink))
                         }
                     }
