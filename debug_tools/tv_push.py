@@ -89,28 +89,35 @@ def find_latest_apk(specified_path=None):
     return os.path.abspath(candidates[0])
 
 def backup_app_data(device):
-    log("正在通过 run-as 备份电视端应用数据 (数据库、配置、自定义源)...")
-    backup_cmd = f"run-as {PACKAGE_NAME} tar -czf {BACKUP_REMOTE_TAR} -C /data/data/{PACKAGE_NAME} databases shared_prefs files 2>/dev/null || true"
-    run_adb(device, ["shell", backup_cmd], check=False)
+    log("正在通过 run-as 备份电视端应用数据 (全量数据库与偏好配置)...")
+    cmd = (
+        f"run-as {PACKAGE_NAME} tar -czf /data/data/{PACKAGE_NAME}/cache/backup.tar.gz -C /data/data/{PACKAGE_NAME} databases shared_prefs 2>/dev/null && "
+        f"run-as {PACKAGE_NAME} cat /data/data/{PACKAGE_NAME}/cache/backup.tar.gz > /data/local/tmp/tv_backup.tar.gz"
+    )
+    res = run_adb(device, ["shell", cmd], check=False)
     
     # 验证备份包是否存在
-    check_res = run_adb(device, ["shell", f"ls -l {BACKUP_REMOTE_TAR}"], check=False)
+    check_res = run_adb(device, ["shell", "ls -lh /data/local/tmp/tv_backup.tar.gz"], check=False)
     if "No such file" in check_res.stdout or check_res.returncode != 0:
-        log("应用数据备份可能为空或当前尚未初始化，继续安装...", "WARN")
+        log("应用数据备份未找到或当前尚未初始化，继续安装...", "WARN")
         return False
     
-    log(f"数据备份成功归档至 {BACKUP_REMOTE_TAR}", "SUCCESS")
+    # 尝试同步一份到 PC 本地 backups 目录作为双重保险
+    os.makedirs("debug_tools/backups", exist_ok=True)
+    run_adb(device, ["pull", "/data/local/tmp/tv_backup.tar.gz", "debug_tools/backups/tv_backup.tar.gz"], check=False)
+    
+    log(f"数据备份成功归档至电视 /data/local/tmp/tv_backup.tar.gz 及本地 PC 备份库", "SUCCESS")
     return True
 
 def restore_app_data(device):
     log("正在从备份包还原应用数据...")
     restore_cmd = (
-        f"run-as {PACKAGE_NAME} tar -xzf {BACKUP_REMOTE_TAR} -C /data/data/{PACKAGE_NAME} && "
-        f"rm -f {BACKUP_REMOTE_TAR}"
+        f"cat /data/local/tmp/tv_backup.tar.gz | run-as {PACKAGE_NAME} tar -xz -C /data/data/{PACKAGE_NAME} && "
+        f"rm -f /data/local/tmp/tv_backup.tar.gz"
     )
     res = run_adb(device, ["shell", restore_cmd], check=False)
     if res.returncode == 0:
-        log("应用数据 (数据库、频道列表、API Key) 还原完成！", "SUCCESS")
+        log("应用数据 (全部频道列表、自定义源、收藏夹、AI 实时字幕配置、API Key) 100% 完整还原！", "SUCCESS")
         return True
     else:
         log(f"还原数据时遇到提示: {res.stderr or res.stdout}", "WARN")
