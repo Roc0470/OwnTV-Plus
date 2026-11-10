@@ -578,9 +578,7 @@ class RealtimeWsEngine(
                 "conversation.item.input_audio_transcription.delta" -> {
                     val delta = evt.optString("delta", "")
                     if (delta.isNotEmpty()) {
-                        if (shouldSplitSentence(partialTranslated.toString(), partialOriginal.toString())) {
-                            finalizeCurrentSentence()
-                        }
+                        // 译文驱动原则：英文 ASR 仅流式累积原文，绝不能因英文标点提前切断未完成的中文翻译
                         partialOriginal.append(delta)
                         emitCurrentCue(isPartial = true)
                     }
@@ -596,8 +594,8 @@ class RealtimeWsEngine(
                 "response.text.delta", "response.audio_transcript.delta", "response.output_text.delta" -> {
                     val delta = evt.optString("delta", "")
                     if (delta.isNotEmpty()) {
-                        // 智能断句：如果前文已经以句末标点（。！？.?!）结尾，新到 delta 为新一句话的开始，立即切句
-                        if (shouldSplitSentence(partialTranslated.toString(), partialOriginal.toString())) {
+                        // 译文驱动切句：仅当中文字符串已以句末标点（。！？；）完整结束，新到 delta 为下一句首字时触发切句
+                        if (shouldSplitByTranslation(partialTranslated.toString())) {
                             finalizeCurrentSentence()
                         }
                         partialTranslated.append(delta)
@@ -612,7 +610,8 @@ class RealtimeWsEngine(
                         partialTranslated.setLength(0)
                         partialTranslated.append(fullText.trim())
                     }
-                    if (partialTranslated.isNotEmpty() || partialOriginal.isNotEmpty()) {
+                    // 仅当中文已生成或说话彻底停止时，才结算定稿，防止腰斩等待中的中文
+                    if (partialTranslated.isNotEmpty() || type == "input_audio_buffer.speech_stopped") {
                         finalizeCurrentSentence()
                     }
                 }
@@ -632,37 +631,22 @@ class RealtimeWsEngine(
     }
 
     /**
-     * 智能断句判断：
-     * 1. 中文译文末尾有明确句末标点（。！？；），且已有至少 6 个字符；
-     * 2. 英文原文末尾有 . ! ? 且非英文常见缩写（如 Mr. U.S.）；
-     * 3. 超长句子保护：中文连续超过 26 个字符且遇逗号（，,）时分句，确保单屏绝不超过 2 行。
+     * 译文驱动切句判断：
+     * 1. 中文译文末尾有明确句末标点（。！？；），且已有至少 4 个汉字；
+     * 2. 超长句子保护：中文连续超过 24 个汉字且遇逗号（，,）或空格时分句，严格控制在两行以内；
+     * 3. 绝不以英文 ASR 标点作为切句依据，防止英文过快切断未完成的中文。
      */
-    private fun shouldSplitSentence(transText: String, origText: String): Boolean {
+    private fun shouldSplitByTranslation(transText: String): Boolean {
         val trans = transText.trimEnd()
-        if (trans.length >= 6) {
+        if (trans.length >= 4) {
             val lastChar = trans.last()
             if (lastChar == '。' || lastChar == '！' || lastChar == '？' || lastChar == '；') {
                 return true
             }
         }
-        val orig = origText.trimEnd()
-        if (orig.length >= 15) {
-            val lastChar = orig.last()
-            if (lastChar == '!' || lastChar == '?') {
-                return true
-            }
-            if (lastChar == '.') {
-                val words = orig.split(' ')
-                val lastWord = words.lastOrNull().orEmpty().lowercase()
-                val isAbbr = lastWord in listOf("mr.", "ms.", "mrs.", "dr.", "u.s.", "u.k.", "e.g.", "i.e.", "vs.", "inc.", "ltd.")
-                if (!isAbbr) {
-                    return true
-                }
-            }
-        }
-        if (trans.length >= 26) {
+        if (trans.length >= 24) {
             val lastChar = trans.last()
-            if (lastChar == '，' || lastChar == ',') {
+            if (lastChar == '，' || lastChar == ',' || lastChar == ' ') {
                 return true
             }
         }

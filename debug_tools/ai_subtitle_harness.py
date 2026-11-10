@@ -33,24 +33,14 @@ ENGLISH_ABBREVIATIONS = {
     "mr.", "ms.", "mrs.", "dr.", "u.s.", "u.k.", "e.g.", "i.e.", "vs.", "inc.", "ltd.", "no.", "vol."
 }
 
-def should_split_sentence(trans_text: str, orig_text: str) -> bool:
-    """与 OwnTV Kotlin 端完全 1:1 的智能断句判断"""
+def should_split_by_translation(trans_text: str) -> bool:
+    """与 OwnTV Kotlin 端 1:1 对齐的译文驱动断句判断"""
     trans = trans_text.rstrip()
-    if len(trans) >= 6 and trans[-1] in ('。', '！', '？', '；'):
+    if len(trans) >= 4 and trans[-1] in ('。', '！', '？', '；'):
         return True
 
-    orig = orig_text.rstrip()
-    if len(orig) >= 15:
-        if orig[-1] in ('!', '?'):
-            return True
-        if orig[-1] == '.':
-            words = orig.split()
-            last_word = words[-1].lower() if words else ""
-            if last_word not in ENGLISH_ABBREVIATIONS:
-                return True
-
     # 长句遇逗号切分（防止超过 2 行）
-    if len(trans) >= 26 and trans[-1] in ('，', ','):
+    if len(trans) >= 24 and trans[-1] in ('，', ',', ' '):
         return True
 
     return False
@@ -161,15 +151,15 @@ class SubtitleHarness:
                     elif evt_type == "conversation.item.input_audio_transcription.delta":
                         delta = evt.get("delta", "")
                         if delta:
-                            if should_split_sentence(self.get_current_trans(), self.get_current_orig()):
-                                self.finalize_sentence()
+                            # 译文驱动：英文 ASR 仅做原文流式累加，绝不因为英文句号擅自切断正在计算的中文
                             self.partial_original.append(delta)
                             self.render_cue_to_console(is_final=False)
 
                     elif evt_type in ("response.text.delta", "response.audio_transcript.delta", "response.output_text.delta"):
                         delta = evt.get("delta", "")
                         if delta:
-                            if should_split_sentence(self.get_current_trans(), self.get_current_orig()):
+                            # 仅当中文自身出现句末标点时才切句
+                            if should_split_by_translation(self.get_current_trans()):
                                 self.finalize_sentence()
                             self.partial_translated.append(delta)
                             self.render_cue_to_console(is_final=False)
@@ -185,7 +175,8 @@ class SubtitleHarness:
                         full_text = evt.get("text", "") or evt.get("transcript", "")
                         if full_text:
                             self.partial_translated = [full_text.strip()]
-                        if self.partial_original or self.partial_translated:
+                        # 仅当中文已产生，或说话彻底停止时，才结算定稿
+                        if self.partial_translated or evt_type == "input_audio_buffer.speech_stopped":
                             self.finalize_sentence()
 
                     elif evt_type == "error":

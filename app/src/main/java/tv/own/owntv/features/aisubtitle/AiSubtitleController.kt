@@ -218,19 +218,38 @@ class AiSubtitleController(
         _state.value = AiSubtitleState.Off
     }
 
+    private var activeCueStartElapsedMs = 0L
+    private var lastActivityElapsedMs = 0L
+
     private fun enqueueCue(cue: AiSubtitleCue) {
         val now = SystemClock.elapsedRealtime()
         val leadMs = configStore.config.value.leadSeconds * 1000L
         val isRunning = _state.value is AiSubtitleState.Running
+        lastActivityElapsedMs = now
 
-        // 在 Realtime / 流式模式下，若已进入延迟播放运行态且已到达或越过对应对齐时刻，直接实时上屏逐字渲染
-        if (isRunning && now >= cue.audioStartElapsedMs + leadMs) {
+        val current = _activeCue.value
+
+        // 1. 同一句的流式内容增量追加 (同一 Cue ID)
+        if (current != null && current.id == cue.id) {
             _activeCue.value = cue
-            lastCueDisplayElapsedMs = now
+            if (current.translatedText.isBlank() && cue.translatedText.isNotBlank()) {
+                activeCueStartElapsedMs = now // 中文译文刚出现，启动 1.8s 最小驻留保护倒计时
+            }
+        } else if (isRunning && now >= cue.audioStartElapsedMs + leadMs) {
+            // 2. 跨句翻篇 (全新 Cue ID)：判断当前屏幕上的旧句是否需要最小驻留保护
+            val currentHasChinese = current != null && current.translatedText.isNotBlank()
+            val currentDisplayDuration = now - activeCueStartElapsedMs
+            if (currentHasChinese && currentDisplayDuration < MIN_TRANSLATION_DISPLAY_MS) {
+                // 当前中文在屏幕展示尚未满 1.8 秒：放入待展示队列缓冲，坚决不暴力强刷，防止中文一闪而过
+                // 留待 tickCueDisplay() 在满 1.8s 后平滑接替
+            } else {
+                // 已满足 1.8 秒保底阅读时间（或旧句无中文），立即平滑接替展示
+                _activeCue.value = cue
+                activeCueStartElapsedMs = if (cue.translatedText.isNotBlank()) now else 0L
+            }
         }
 
         synchronized(pendingCues) {
-            // 若队列中已有相同 id 的流式增量字幕，原地更新它
             val idx = pendingCues.indexOfFirst { it.id == cue.id }
             if (idx >= 0) {
                 val list = pendingCues.toMutableList()
@@ -246,43 +265,56 @@ class AiSubtitleController(
         }
     }
 
-    private var lastCueDisplayElapsedMs = 0L
-
     private fun tickCueDisplay() {
         val now = SystemClock.elapsedRealtime()
         val leadMs = configStore.config.value.leadSeconds * 1000L
-
-        var toShow: AiSubtitleCue? = null
-        synchronized(pendingCues) {
-            val ready = pendingCues.filter { cue ->
-                now >= cue.audioStartElapsedMs + leadMs
-            }
-            if (ready.isNotEmpty()) {
-                val latest = ready.last()
-                toShow = latest
-                // 仅淘汰比当前展示字幕更旧的旧句子
-                while (pendingCues.isNotEmpty() && pendingCues.first().id != latest.id) {
-                    pendingCues.removeFirst()
-                }
-                // 若该句已定稿完成，从待展示队列移除，移交屏幕驻留计时器接管
-                if (!latest.isPartial) {
-                    pendingCues.removeFirstOrNull()
-                }
-            }
-        }
-
-        if (toShow != null) {
-            _activeCue.value = toShow
-            lastCueDisplayElapsedMs = now
-            return
-        }
-
-        // 检查当前屏幕上的字幕是否已超过显示时长（停顿或静音后停留 2.8 秒平滑消隐，避免屏幕留存过期短句）
         val current = _activeCue.value
+
+        // 核心保护：若当前屏幕已有中文且展示还未满 1.8 秒，等待满足保底阅读时长后再翻篇
+        val currentHasChinese = current != null && current.translatedText.isNotBlank()
+        val currentDisplayDuration = now - activeCueStartElapsedMs
+        val isLockedByMinDisplay = currentHasChinese && currentDisplayDuration < MIN_TRANSLATION_DISPLAY_MS
+
+        if (!isLockedByMinDisplay) {
+            var toShow: AiSubtitleCue? = null
+            synchronized(pendingCues) {
+                val ready = pendingCues.filter { cue ->
+                    now >= cue.audioStartElapsedMs + leadMs
+                }
+                if (ready.isNotEmpty()) {
+                    val latest = ready.last()
+                    // 仅当准备展示的 Cue 与当前不同，或者包含更新的文本内容时切换
+                    if (current == null || latest.id != current.id || latest.translatedText.length > current.translatedText.length) {
+                        toShow = latest
+                        while (pendingCues.isNotEmpty() && pendingCues.first().id != latest.id) {
+                            pendingCues.removeFirst()
+                        }
+                        if (!latest.isPartial) {
+                            pendingCues.removeFirstOrNull()
+                        }
+                    }
+                }
+            }
+
+            if (toShow != null) {
+                _activeCue.value = toShow
+                if (toShow.translatedText.isNotBlank()) {
+                    if (current == null || toShow.id != current.id || activeCueStartElapsedMs == 0L) {
+                        activeCueStartElapsedMs = now
+                    }
+                } else {
+                    activeCueStartElapsedMs = 0L
+                }
+                return
+            }
+        }
+
+        // 静音与停顿消隐：距最后活动超过 2.8 秒且已满足 1.8 秒最小阅读时长，平滑消隐
         if (current != null) {
-            val holdMs = 2800L
-            if (now - lastCueDisplayElapsedMs > holdMs) {
+            val quietDuration = now - lastActivityElapsedMs
+            if (quietDuration > SILENCE_FADE_OUT_MS && !isLockedByMinDisplay) {
                 _activeCue.value = null
+                activeCueStartElapsedMs = 0L
             }
         }
     }
@@ -311,5 +343,9 @@ class AiSubtitleController(
     companion object {
         private const val TAG = "AiSubtitleController"
         private const val MAX_PENDING_CUES = 20
+        /** 中文译文保底安全阅读时长，彻底杜绝快语速下一闪而过 */
+        private const val MIN_TRANSLATION_DISPLAY_MS = 1800L
+        /** 静音停顿后平滑消隐时间 */
+        private const val SILENCE_FADE_OUT_MS = 2800L
     }
 }
