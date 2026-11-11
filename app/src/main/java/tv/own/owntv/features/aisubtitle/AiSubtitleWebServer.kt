@@ -515,7 +515,7 @@ class AiSubtitleWebServer(
           }
       }</span>
     </div>
-    <input type="range" id="syncOffsetMs" min="-4000" max="4000" step="250" value="${cfg.syncOffsetMs}" oninput="onSyncOffsetInput(this.value)">
+    <input type="range" id="syncOffsetMs" min="-10000" max="15000" step="250" value="${cfg.syncOffsetMs}" oninput="onSyncOffsetInput(this.value)">
     <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap:6px; margin-top:8px;">
       <button type="button" class="preset-btn" style="text-align:center; padding:8px 0;" onclick="stepSyncOffset(-1000)">-1.0s</button>
       <button type="button" class="preset-btn" style="text-align:center; padding:8px 0;" onclick="stepSyncOffset(-500)">-0.5s</button>
@@ -583,7 +583,7 @@ function onSyncOffsetInput(val) {
 function stepSyncOffset(delta, isReset) {
   const input = document.getElementById('syncOffsetMs');
   let next = isReset ? 0 : parseInt(input.value || '0', 10) + delta;
-  next = Math.max(-4000, Math.min(4000, next));
+  next = Math.max(-10000, Math.min(15000, next));
   input.value = next;
   onSyncOffsetInput(next);
 }

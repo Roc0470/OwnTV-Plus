@@ -129,6 +129,34 @@ fun AiSubtitleOverlay(
                     )
                 }
             }
+            is AiSubtitleState.Running -> {
+                if (s.statusHint.isNotBlank() && (cue == null || s.statusHint.contains("缓冲"))) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 18.dp * sizeScale)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(Color(0xB30D1821))
+                            .padding(horizontal = 20.dp * sizeScale, vertical = 10.dp * sizeScale),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OwnTVIcon(
+                            icon = OwnTVIcon.SPARKLE,
+                            tint = Color(0xFF2DD4BF),
+                            modifier = Modifier.size((18 * sizeScale).dp),
+                        )
+                        Text(
+                            text = s.statusHint,
+                            style = TextStyle(
+                                color = Color.White.copy(alpha = 0.9f),
+                                fontSize = (17 * sizeScale * uiFontCompensation).sp,
+                                fontWeight = FontWeight.Medium,
+                            ),
+                        )
+                    }
+                }
+            }
             is AiSubtitleState.Error -> {
                 Row(
                     modifier = Modifier
@@ -479,17 +507,29 @@ fun AiSubtitleSettingsDialog(
                     else -> "0.0s (正常对齐)"
                 }
                 AiStepperRow(
-                    title = "字幕时序快慢微调 (同步校准)",
+                    title = "字幕时序快慢微调 (-10s ~ +15s)",
                     subtitle = "遥控器 ◀ 字幕提前 0.5s (防慢)，▶ 字幕延后 0.5s (防抢跑)，按 OK 键重置 0.0s",
                     valueText = offsetLabel,
                     onLeft = {
-                        controller.configStore.adjustSyncOffset(-AiSubtitleConfigStore.STEP_SYNC_OFFSET_MS)
+                        controller.adjustSyncOffset(-AiSubtitleConfigStore.STEP_SYNC_OFFSET_MS)
                     },
                     onRight = {
-                        controller.configStore.adjustSyncOffset(AiSubtitleConfigStore.STEP_SYNC_OFFSET_MS)
+                        controller.adjustSyncOffset(AiSubtitleConfigStore.STEP_SYNC_OFFSET_MS)
                     },
                     onClick = {
-                        controller.configStore.resetSyncOffset()
+                        controller.resetSyncOffset()
+                    },
+                )
+            }
+
+            item {
+                StagePopupOption(
+                    title = "立即对齐当前语音（消除卡顿抢跑）",
+                    subtitle = "若播放源经历长时间卡顿或断流跳帧后字幕与人声错位，点击立即重锚定至最新一句语音",
+                    leading = { StagePopupIcon(OwnTVIcon.SPARKLE) },
+                    value = "一键对齐",
+                    onClick = {
+                        controller.syncToLiveNow()
                     },
                 )
             }

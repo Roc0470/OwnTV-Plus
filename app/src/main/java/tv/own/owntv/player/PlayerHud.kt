@@ -933,7 +933,8 @@ fun PlayerHud(
             val aiSubController = org.koin.compose.koinInject<tv.own.owntv.features.aisubtitle.AiSubtitleController>()
             val aiSubState by aiSubController.state.collectAsStateWithLifecycle()
             val aiSubEnabled = aiSubState !is tv.own.owntv.features.aisubtitle.AiSubtitleState.Off
-            val aiSubConfigured = aiSubController.configStore.config.collectAsStateWithLifecycle().value.isConfigured
+            val aiSubCfg by aiSubController.configStore.config.collectAsStateWithLifecycle()
+            val aiSubConfigured = aiSubCfg.isConfigured
             TrackDialog(
                 stringResource(R.string.player_subtitles), subTracks,
                 onSelect = { player.selectSubtitle(it.mpvId); dialog = HudDialog.NONE },
@@ -944,8 +945,16 @@ fun PlayerHud(
                 // Subtitle timing: only when adjustment applies to the ACTIVE subtitle on the
                 // current engine (any mpv text sub; external side-loads on ExoPlayer).
                 subDelayMs = subDelay,
-                onAdjustSubDelay = if (player.subtitleTimingAvailable()) player::adjustSubtitleDelay else null,
-                onResetSubDelay = player::resetSubtitleDelay,
+                onAdjustSubDelay = if (player.subtitleTimingAvailable()) {
+                    { delta ->
+                        player.adjustSubtitleDelay(delta)
+                        if (aiSubEnabled) aiSubController.adjustSyncOffset(delta)
+                    }
+                } else null,
+                onResetSubDelay = {
+                    player.resetSubtitleDelay()
+                    if (aiSubEnabled) aiSubController.resetSyncOffset()
+                },
                 aiSubtitleEnabled = aiSubEnabled,
                 onToggleAiSubtitle = {
                     if (!aiSubEnabled && !aiSubConfigured) {
@@ -956,6 +965,10 @@ fun PlayerHud(
                     }
                 },
                 onOpenAiSubtitleSettings = { dialog = HudDialog.AI_SUBS },
+                aiSubOffsetMs = aiSubCfg.syncOffsetMs,
+                onAdjustAiSubOffset = { delta -> aiSubController.adjustSyncOffset(delta) },
+                onResetAiSubOffset = { aiSubController.resetSyncOffset() },
+                onSyncAiSubNow = { aiSubController.syncToLiveNow() },
             )
         }
         HudDialog.AI_SUBS -> {

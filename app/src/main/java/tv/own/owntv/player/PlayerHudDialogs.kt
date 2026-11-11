@@ -85,6 +85,10 @@ internal fun TrackDialog(
     aiSubtitleEnabled: Boolean = false,
     onToggleAiSubtitle: (() -> Unit)? = null,
     onOpenAiSubtitleSettings: (() -> Unit)? = null,
+    aiSubOffsetMs: Int = 0,
+    onAdjustAiSubOffset: ((Int) -> Unit)? = null,
+    onResetAiSubOffset: (() -> Unit)? = null,
+    onSyncAiSubNow: (() -> Unit)? = null,
 ) {
     val focus = remember { FocusRequester() }
     BackHandler { onDismiss() }
@@ -159,6 +163,24 @@ internal fun TrackDialog(
             }
             if (onOpenAiSubtitleSettings != null) {
                 item { ActionRow(stringResource(R.string.player_ai_subtitle_settings), OwnTVIcon.SPARKLE, onOpenAiSubtitleSettings) }
+            }
+            if (aiSubtitleEnabled && onAdjustAiSubOffset != null) {
+                item {
+                    StepperRow(
+                        title = stringResource(R.string.player_ai_subtitle_timing_nudge),
+                        value = formatSubDelay(aiSubOffsetMs),
+                        step = 500,
+                        canStep = { it in -10_000..15_000 },
+                        current = aiSubOffsetMs,
+                        onStep = onAdjustAiSubOffset,
+                        onClick = { onResetAiSubOffset?.invoke() },
+                    )
+                }
+            }
+            if (aiSubtitleEnabled && onSyncAiSubNow != null) {
+                item {
+                    ActionRow(stringResource(R.string.player_ai_subtitle_sync_now), OwnTVIcon.SPARKLE, onSyncAiSubNow)
+                }
             }
         }
         // ADJUST (subtitles dialog): timing panel for the active subtitle.

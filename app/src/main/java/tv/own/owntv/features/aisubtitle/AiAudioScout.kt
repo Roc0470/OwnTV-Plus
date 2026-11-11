@@ -6,13 +6,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
-import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
@@ -22,18 +19,17 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
-import androidx.media3.exoplayer.audio.AudioCapabilities
-import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import okhttp3.OkHttpClient
-import tv.own.owntv.player.StereoDownmix
+import tv.own.owntv.player.LivePreviewEngine
 import tv.own.owntv.player.ffmpeg.FfmpegAudioRenderer
 import tv.own.owntv.player.ffmpeg.FfmpegLibrary
 import java.io.ByteArrayOutputStream
+import java.lang.reflect.Field
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
@@ -46,12 +42,14 @@ private const val TAG = "AiAudioScout"
  *
  * @property pcmBytes 16000Hz, Mono, 16-bit Little-Endian 原始 PCM 字节数组
  * @property startElapsedMs 该段音频开始采集时的系统时钟 (SystemClock.elapsedRealtime())
+ * @property audioPtsMs 该段音频对应的累计已解码有效音频时钟（毫秒），用于与主播放器实际播放进度精准对齐
  * @property durationMs 音频时长（毫秒）
  * @property rmsEnergy 归一化均方根能量 (0.0 ~ 1.0)，用于静音检测 (VAD)
  */
 data class Pcm16kChunk(
     val pcmBytes: ByteArray,
     val startElapsedMs: Long,
+    val audioPtsMs: Long = 0L,
     val durationMs: Long,
     val rmsEnergy: Float,
 ) {
@@ -102,32 +100,38 @@ data class Pcm16kChunk(
  * 16kHz 单声道 16-bit PCM 音频重采样与静音输出处理器。
  *
  * 核心职责：
- * 1. 接收任意采样率（如 48000Hz、44100Hz、32000Hz）与声道数（1~8 声道）的 16-bit PCM 输入；
+ * 1. 接收任意采样率（如 48000Hz、44100Hz、32000Hz）与声道数（1~8 声道）的 16-bit / Float PCM 输入；
  * 2. 将多声道混音为单声道（Mono），并线性插值重采样至 16000Hz 16-bit Little-Endian PCM；
- * 3. 实时回调：
- *    - [onFramePcm]：每约 100ms（3200 字节）回调一次，供 WebSocket Realtime 引擎实时流式推送；
- *    - [onSegmentPcm]：每约 2.8 秒或检测到语句停顿时回调一次，供 OpenAI 兼容分段引擎识别翻译；
- * 4. 向扬声器下游输出等长的静音 PCM 数据，确保此探路播放器（Scout）既维持正常的 Media3 音频时钟推进，
- *    又绝对不会发出任何声音干扰主播放器。
+ * 3. 维护累计有效音频时钟 [cumulativeAudioMs]，实时回调：
+ *    - [onFramePcm]：每约 100ms（3200 字节）回调一次，携带当前帧起始的 `audioPtsMs`；
+ *    - [onSegmentPcm]：每约 2.8 秒或检测到语句停顿时回调一次，携带切片起始的 `audioPtsMs`；
+ * 4. 支持两种工作模式：
+ *    - **独立 DefaultAudioSink 静音超前探路模式 ([queueInput])**向下游输出等长静音字节，维持正常的硬件 AudioTrack 时钟；
+ *    - **主播放器无损旁路镜像模式 ([tapPcmBuffer])**直接从主播放器 AudioSink 旁路复制已消费的 PCM 字节，零额外网络连接。
  */
 @UnstableApi
 class Pcm16kAudioProcessor(
-    private val onFramePcm: (ByteArray) -> Unit,
+    private val onFramePcm: (ByteArray, Long) -> Unit,
     private val onSegmentPcm: (Pcm16kChunk) -> Unit,
 ) : BaseAudioProcessor() {
 
-    private var inSampleRate = 48000
-    private var inChannels = 2
-    private var inEncoding = C.ENCODING_PCM_16BIT
+    @Volatile private var inSampleRate = 48000
+    @Volatile private var inChannels = 2
+    @Volatile private var inEncoding = C.ENCODING_PCM_16BIT
     private var resamplePos = 0.0
     private var totalFramesSent = 0L
+
+    /** 累计已解码输出的 16kHz 音频毫秒数（每 3200 字节精确递增 100ms） */
+    @Volatile var cumulativeAudioMs: Long = 0L
+        private set
 
     // 100ms 实时流式帧缓冲 (16000Hz * 2 bytes * 0.1s = 3200 bytes)
     private val frameBuffer = ByteArrayOutputStream(6400)
 
-    // 分段音频缓冲（用于 OpenAI 兼容 HTTP 引擎，约 2.4s ~ 3.6s 一段）
+    // 分段音频缓冲（用于 OpenAI 兼容 HTTP 引擎，约 2.0s ~ 3.2s 一段）
     private val segmentBuffer = ByteArrayOutputStream(TARGET_SAMPLE_RATE * 2 * 5)
     private var segmentStartElapsedMs = 0L
+    private var segmentStartPtsMs = 0L
     private var segmentSumSquares = 0.0
     private var segmentSampleCount = 0
     private var trailingSilentSamples = 0
@@ -156,11 +160,35 @@ class Pcm16kAudioProcessor(
             frameBuffer.reset()
             segmentBuffer.reset()
             segmentStartElapsedMs = 0L
+            segmentStartPtsMs = 0L
             segmentSumSquares = 0.0
             segmentSampleCount = 0
             trailingSilentSamples = 0
             totalFramesSent = 0L
+            cumulativeAudioMs = 0L
         }
+    }
+
+    /**
+     * 主播放器旁路镜像入口：直接处理从主播放器 AudioSink.handleBuffer 旁路复制的 PCM 缓冲区，不修改原缓冲区。
+     */
+    fun tapPcmBuffer(
+        dupBuffer: ByteBuffer,
+        sampleRate: Int,
+        channels: Int,
+        encoding: Int,
+    ) {
+        if (encoding != C.ENCODING_PCM_16BIT && encoding != C.ENCODING_PCM_FLOAT) return
+        val sr = if (sampleRate > 0) sampleRate.coerceAtLeast(8000) else inSampleRate
+        val ch = if (channels > 0) channels.coerceIn(1, 8) else inChannels
+        if (sr != inSampleRate || ch != inChannels || encoding != inEncoding) {
+            inSampleRate = sr
+            inChannels = ch
+            inEncoding = encoding
+            resamplePos = 0.0
+            Log.i(TAG, "Pcm16kAudioProcessor tap format updated: sampleRate=$inSampleRate, channels=$inChannels, encoding=$inEncoding")
+        }
+        processInternal(dupBuffer, advanceInputPosition = false)
     }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
@@ -172,6 +200,29 @@ class Pcm16kAudioProcessor(
         val inFrames = remaining / frameSize
         if (inFrames <= 0) {
             inputBuffer.position(inputBuffer.limit())
+            return
+        }
+
+        val consumedBytes = inFrames * frameSize
+        processInternal(inputBuffer, advanceInputPosition = true)
+
+        // 向下游 DefaultAudioSink 输出等长的静音 PCM 数据，驱动硬件 AudioTrack 时钟正常走字进入 STATE_READY
+        val silentOut = replaceOutputBuffer(consumedBytes)
+        for (i in 0 until consumedBytes) {
+            silentOut.put(0.toByte())
+        }
+        silentOut.flip()
+    }
+
+    private fun processInternal(inputBuffer: ByteBuffer, advanceInputPosition: Boolean) {
+        val remaining = inputBuffer.remaining()
+        if (remaining == 0) return
+
+        val bytesPerSample = if (inEncoding == C.ENCODING_PCM_FLOAT) 4 else 2
+        val frameSize = inChannels * bytesPerSample
+        val inFrames = remaining / frameSize
+        if (inFrames <= 0) {
+            if (advanceInputPosition) inputBuffer.position(inputBuffer.limit())
             return
         }
 
@@ -200,23 +251,23 @@ class Pcm16kAudioProcessor(
             }
         }
 
-        // 消耗输入 Buffer，下游采用 HeadlessAudioSink，直接输出空缓冲节省内存
-        val consumedBytes = inFrames * frameSize
-        inputBuffer.position(inputBuffer.position() + consumedBytes)
-        val silentOut = replaceOutputBuffer(0)
-        silentOut.flip()
+        if (advanceInputPosition) {
+            val consumedBytes = inFrames * frameSize
+            inputBuffer.position(inputBuffer.position() + consumedBytes)
+        }
 
         // 重采样至 16000Hz Mono 16-bit LE
         val step = inSampleRate.toDouble() / TARGET_SAMPLE_RATE.toDouble()
         var pos = resamplePos
-        val nowElapsed = android.os.SystemClock.elapsedRealtime()
+        val nowElapsed = SystemClock.elapsedRealtime()
 
-        var readyFrame: ByteArray? = null
+        val readyFrames = mutableListOf<Pair<ByteArray, Long>>()
         var readySegment: Pcm16kChunk? = null
 
         synchronized(this) {
             if (segmentStartElapsedMs == 0L) {
                 segmentStartElapsedMs = nowElapsed
+                segmentStartPtsMs = cumulativeAudioMs
             }
             while (pos < inFrames) {
                 val idx = pos.toInt()
@@ -246,22 +297,21 @@ class Pcm16kAudioProcessor(
                     trailingSilentSamples = 0
                 }
 
+                if (frameBuffer.size() >= FRAME_BYTES_100MS) {
+                    val framePts = cumulativeAudioMs
+                    readyFrames.add(frameBuffer.toByteArray() to framePts)
+                    frameBuffer.reset()
+                    totalFramesSent++
+                    cumulativeAudioMs = totalFramesSent * 100L
+                    if (totalFramesSent == 1L || totalFramesSent % 30L == 0L) {
+                        Log.i(TAG, "AudioScout streamed ${cumulativeAudioMs / 1000.0}s PCM audio to AI engine (sr=$inSampleRate, ch=$inChannels)")
+                    }
+                }
+
                 pos += step
             }
             resamplePos = pos - inFrames
 
-            if (frameBuffer.size() >= FRAME_BYTES_100MS) {
-                readyFrame = frameBuffer.toByteArray()
-                frameBuffer.reset()
-                totalFramesSent++
-                if (totalFramesSent % 30L == 0L) {
-                    Log.d(TAG, "AudioScout streamed ${totalFramesSent * 100 / 1000}s PCM audio to AI engine")
-                }
-            }
-
-            // 分段切分策略：
-            // 1. 已累积 >= 2.0 秒音频，且末尾出现 >= 0.28 秒静音停顿（自然断句）；
-            // 2. 或已累积达到最大 3.4 秒强制切分，保证字幕实时性。
             val reachedNaturalBreak =
                 segmentSampleCount >= MIN_SEGMENT_SAMPLES && trailingSilentSamples >= PAUSE_SILENCE_SAMPLES
             val reachedMaxLen = segmentSampleCount >= MAX_SEGMENT_SAMPLES
@@ -277,18 +327,22 @@ class Pcm16kAudioProcessor(
                 readySegment = Pcm16kChunk(
                     pcmBytes = pcmBytes,
                     startElapsedMs = segmentStartElapsedMs,
+                    audioPtsMs = segmentStartPtsMs,
                     durationMs = durMs,
                     rmsEnergy = rms,
                 )
                 segmentBuffer.reset()
                 segmentStartElapsedMs = nowElapsed
+                segmentStartPtsMs = cumulativeAudioMs
                 segmentSumSquares = 0.0
                 segmentSampleCount = 0
                 trailingSilentSamples = 0
             }
         }
 
-        readyFrame?.let { runCatching { onFramePcm(it) } }
+        for ((frame, pts) in readyFrames) {
+            runCatching { onFramePcm(frame, pts) }
+        }
         readySegment?.let { runCatching { onSegmentPcm(it) } }
     }
 
@@ -303,69 +357,47 @@ class Pcm16kAudioProcessor(
 }
 
 /**
- * 纯内存、零硬件物理声卡占用的 Headless AudioSink。
- *
- * 核心职责：
- * 1. 彻底斩断对 Android 底层物理 AudioTrack 的创建申请，杜绝任何 AudioFlinger status: -12 崩溃与声卡独占冲突；
- * 2. 接收解码器输出的 PCM 缓冲，直接投递给 [Pcm16kAudioProcessor] 进行 16kHz 重采样与分段识别；
- * 3. 维护单调递增的音频时钟，向上游解码器汇报 100% 消耗，驱动 ExoPlayer 管线平滑解码。
+ * 挂载于主播放器 (LivePreviewEngine) 音频渲染器上的无损旁路镜像 AudioSink。
  */
 @UnstableApi
-class HeadlessAudioSink(
-    private val processor: Pcm16kAudioProcessor,
-) : AudioSink {
-    private var listener: AudioSink.Listener? = null
-    private var isPlaying = false
-    private var lastPtsUs = 0L
-    private var lastPtsElapsedMs = 0L
-    private var playbackParams = PlaybackParameters.DEFAULT
+class TapForwardingAudioSink(
+    private val delegate: AudioSink,
+    @Volatile var activeProcessor: Pcm16kAudioProcessor?,
+    private val playerRef: ExoPlayer,
+) : AudioSink by delegate {
 
-    override fun setListener(listener: AudioSink.Listener) {
-        this.listener = listener
+    @Volatile private var configuredSampleRate = 48000
+    @Volatile private var configuredChannels = 2
+    @Volatile private var configuredEncoding = C.ENCODING_PCM_16BIT
+
+    init {
+        syncFormatFromPlayer()
     }
 
-    override fun supportsFormat(format: Format): Boolean {
-        val mime = format.sampleMimeType ?: return false
-        val isRaw = MimeTypes.AUDIO_RAW.equals(mime, ignoreCase = true) || mime.startsWith("audio/raw")
-        val isPcm = format.pcmEncoding == C.ENCODING_PCM_16BIT || format.pcmEncoding == C.ENCODING_PCM_FLOAT
-        return isRaw || isPcm
-    }
-
-    override fun getFormatSupport(format: Format): Int {
-        return if (supportsFormat(format)) {
-            AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY
-        } else {
-            AudioSink.SINK_FORMAT_UNSUPPORTED
+    fun syncFormatFromPlayer() {
+        runCatching {
+            val fmt = playerRef.audioFormat
+            if (fmt != null) {
+                if (fmt.sampleRate > 0) configuredSampleRate = fmt.sampleRate
+                if (fmt.channelCount > 0) configuredChannels = fmt.channelCount
+                if (fmt.pcmEncoding == C.ENCODING_PCM_16BIT || fmt.pcmEncoding == C.ENCODING_PCM_FLOAT) {
+                    configuredEncoding = fmt.pcmEncoding
+                }
+            }
         }
-    }
-
-    override fun getFormatOffloadSupport(format: Format): AudioOffloadSupport =
-        AudioOffloadSupport.DEFAULT_UNSUPPORTED
-
-    override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
-        if (!isPlaying || lastPtsElapsedMs == 0L) return lastPtsUs
-        val elapsedUs = (SystemClock.elapsedRealtime() - lastPtsElapsedMs) * 1000L
-        return lastPtsUs + elapsedUs
     }
 
     override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
-        val enc = if (inputFormat.pcmEncoding != C.ENCODING_INVALID) inputFormat.pcmEncoding else C.ENCODING_PCM_16BIT
-        Log.i(TAG, "HeadlessAudioSink configure: sampleRate=${inputFormat.sampleRate}, channels=${inputFormat.channelCount}, enc=$enc, mime=${inputFormat.sampleMimeType}")
-        processor.configure(AudioProcessor.AudioFormat(inputFormat.sampleRate, inputFormat.channelCount, enc))
-        processor.flush()
-    }
-
-    override fun play() {
-        isPlaying = true
-        lastPtsElapsedMs = SystemClock.elapsedRealtime()
-    }
-
-    override fun pause() {
-        if (isPlaying) {
-            lastPtsUs = getCurrentPositionUs(false)
-            isPlaying = false
-            lastPtsElapsedMs = 0L
+        if (inputFormat.sampleRate > 0) configuredSampleRate = inputFormat.sampleRate
+        if (inputFormat.channelCount > 0) configuredChannels = inputFormat.channelCount
+        val enc = if (inputFormat.pcmEncoding == C.ENCODING_PCM_16BIT || inputFormat.pcmEncoding == C.ENCODING_PCM_FLOAT) {
+            inputFormat.pcmEncoding
+        } else {
+            C.ENCODING_PCM_16BIT
         }
+        configuredEncoding = enc
+        Log.i(TAG, "TapForwardingAudioSink configure: sr=$configuredSampleRate, ch=$configuredChannels, enc=$configuredEncoding, mime=${inputFormat.sampleMimeType}")
+        delegate.configure(inputFormat, specifiedBufferSize, outputChannels)
     }
 
     override fun handleBuffer(
@@ -373,86 +405,167 @@ class HeadlessAudioSink(
         presentationTimeUs: Long,
         encodedAccessUnitCount: Int,
     ): Boolean {
-        lastPtsUs = presentationTimeUs
-        lastPtsElapsedMs = SystemClock.elapsedRealtime()
-        processor.queueInput(buffer)
-        buffer.position(buffer.limit())
-        return true
-    }
+        val proc = activeProcessor
+        if (proc == null) {
+            return delegate.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+        }
 
-    override fun handleDiscontinuity() {}
-    override fun playToEndOfStream() {}
-    override fun isEnded(): Boolean = false
-    override fun hasPendingData(): Boolean = false
+        val startPos = buffer.position()
+        val origLimit = buffer.limit()
+        val dup = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
 
-    override fun setPlaybackParameters(playbackParameters: PlaybackParameters) {
-        playbackParams = playbackParameters
-    }
+        val handled = delegate.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+        val endPos = if (handled) origLimit else buffer.position()
 
-    override fun getPlaybackParameters(): PlaybackParameters = playbackParams
-    override fun setSkipSilenceEnabled(skipSilenceEnabled: Boolean) {}
-    override fun getSkipSilenceEnabled(): Boolean = false
-    override fun setAudioAttributes(audioAttributes: AudioAttributes) {}
-    override fun getAudioAttributes(): AudioAttributes = AudioAttributes.DEFAULT
-    override fun setAudioSessionId(audioSessionId: Int) {}
-    override fun setAuxEffectInfo(auxEffectInfo: androidx.media3.common.AuxEffectInfo) {}
-    override fun getAudioTrackBufferSizeUs(): Long = 0L
-    override fun enableTunnelingV21() {}
-    override fun disableTunneling() {}
-    override fun setVolume(volume: Float) {}
-
-    override fun flush() {
-        processor.flush()
-        lastPtsElapsedMs = SystemClock.elapsedRealtime()
-    }
-
-    override fun reset() {
-        flush()
-        processor.reset()
-        isPlaying = false
-        lastPtsUs = 0L
-        lastPtsElapsedMs = 0L
+        if (endPos > startPos) {
+            dup.position(startPos)
+            dup.limit(endPos)
+            proc.tapPcmBuffer(dup, configuredSampleRate, configuredChannels, configuredEncoding)
+        }
+        return handled
     }
 }
 
 /**
- * 后台音频探路器 (AiAudioScout)。
+ * 音频采集与超前探路器 (AiAudioScout)。
  *
- * 复刻 VsTV 的“提前收听 + 延迟直播”架构：
- * - 当开启 AI 实时字幕时，主画面播放器暂停 `leadSeconds` 秒（例如 5 秒），而 [AiAudioScout] 保持在直播最前沿实时拉取音频轨道；
- * - 禁用视频轨道解码（`C.TRACK_TYPE_VIDEO` disabled），完全不占用硬件视频解码器（MediaCodec Video），只解码音频轨；
- * - 挂载 [HeadlessAudioSink] 纯内存消费 PCM 数据，绝对不向系统申请硬件 AudioTrack，零硬件声卡冲突。
+ * 采用“超前探路优先 + 单连接异常自动回退直采”双模自适应架构：
+ * 1. **主模式（超前探路对齐模式）**：启动独立静音 ExoPlayer 超前拉取音频轨，配合主画面暂停攒出 `leadSeconds` 真实音频超前量，
+ *    既能 100% 抵消 AI 识别翻译延迟，又能为用户的“字幕提前/延后”双向微调提供充足的未来字幕缓冲；
+ * 2. **回退模式（零连接旁路直采模式）**：若遇到单连接限制（Max Connections = 1）导致独立探路器连接报错或超时，
+ *    自动销毁独立播放器并无缝切换至 [TapForwardingAudioSink] 挂载主播放器内存直采，确保不断流。
  */
 @UnstableApi
 class AiAudioScout(
     private val context: Context,
-    private val onFramePcm: (ByteArray) -> Unit,
+    private val onFramePcm: (ByteArray, Long) -> Unit,
     private val onSegmentPcm: (Pcm16kChunk) -> Unit,
     private val onScoutError: (String) -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var exoPlayer: ExoPlayer? = null
     private var currentUrl: String? = null
+    private val attachedSinks = mutableListOf<TapForwardingAudioSink>()
+    @Volatile private var activeProcessor: Pcm16kAudioProcessor? = null
+
+    /** 当前是否处于主播放器内存直采回退模式（false 表示独立超前探路模式） */
+    @Volatile var isDirectTapMode: Boolean = false
+        private set
+
+    /** 独立探路器当前是否因主播放器长时间卡顿而被临时暂停等待 */
+    @Volatile var isStandalonePausedForMainStall: Boolean = false
+        private set
+
+    /** 当前会话已累计解码并送往 AI 的有效音频毫秒数 */
+    val decodedAudioMs: Long
+        get() = activeProcessor?.cumulativeAudioMs ?: 0L
 
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(12, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
     }
 
-    /** 启动或切换到指定直播流 URL 的音频探路采集 */
-    fun start(url: String, userAgent: String? = null) {
+    /**
+     * 当主播放器卡顿导致探路器超前过多时，可临时暂停/恢复独立探路播放器，防止无限超前脱节。
+     */
+    fun setStandalonePaused(paused: Boolean) {
+        if (isDirectTapMode) return
+        if (isStandalonePausedForMainStall == paused) return
+        isStandalonePausedForMainStall = paused
         mainHandler.post {
-            stopInternal()
+            val p = exoPlayer ?: return@post
+            runCatching {
+                p.playWhenReady = !paused
+                Log.i(TAG, "Standalone AiAudioScout paused=$paused (decodedAudioMs=$decodedAudioMs)")
+            }
+        }
+    }
+
+    /**
+     * 挂载到主播放器 [LivePreviewEngine] 的音频渲染器上（零网络连接、零额外解码器）。
+     */
+    fun attachToLiveEngine(liveEngine: LivePreviewEngine): Boolean {
+        return runCatching {
+            val playerField = findField(liveEngine.javaClass, "player") ?: return false
+            playerField.isAccessible = true
+            val player = playerField.get(liveEngine) as? ExoPlayer ?: return false
+
+            isDirectTapMode = true
+            val proc = activeProcessor ?: Pcm16kAudioProcessor(
+                onFramePcm = onFramePcm,
+                onSegmentPcm = onSegmentPcm,
+            ).also { activeProcessor = it }
+
+            var hookedCount = 0
+            for (i in 0 until player.rendererCount) {
+                val renderer = player.getRenderer(i)
+                if (renderer.trackType == C.TRACK_TYPE_AUDIO) {
+                    val sinkField = findField(renderer.javaClass, "audioSink") ?: continue
+                    sinkField.isAccessible = true
+                    val currentSink = sinkField.get(renderer) as? AudioSink ?: continue
+                    if (currentSink is TapForwardingAudioSink) {
+                        currentSink.activeProcessor = proc
+                        currentSink.syncFormatFromPlayer()
+                        if (!attachedSinks.contains(currentSink)) {
+                            attachedSinks.add(currentSink)
+                        }
+                        hookedCount++
+                    } else {
+                        val tapSink = TapForwardingAudioSink(currentSink, proc, player)
+                        sinkField.set(renderer, tapSink)
+                        attachedSinks.add(tapSink)
+                        hookedCount++
+                        Log.i(TAG, "Successfully attached TapForwardingAudioSink to ${renderer.javaClass.simpleName}!")
+                    }
+                }
+            }
+            hookedCount > 0
+        }.getOrElse { e ->
+            Log.w(TAG, "attachToLiveEngine failed: ${e.message}", e)
+            false
+        }
+    }
+
+    private fun findField(clazz: Class<*>, fieldName: String): Field? {
+        var cur: Class<*>? = clazz
+        while (cur != null && cur != Any::class.java) {
+            try {
+                return cur.getDeclaredField(fieldName)
+            } catch (_: NoSuchFieldException) {
+                cur = cur.superclass
+            }
+        }
+        return null
+    }
+
+    /**
+     * 启动独立超前音频探路采集。
+     * @param onStandaloneFailed 当独立探路因单连接限制等原因建连失败时回调，由控制器无缝回退至主播放器直采
+     */
+    fun startStandalone(
+        url: String,
+        userAgent: String? = null,
+        onStandaloneFailed: (() -> Unit)? = null,
+    ) {
+        mainHandler.post {
+            stopStandaloneInternal()
+            for (sink in attachedSinks) {
+                sink.activeProcessor = null
+            }
+            isDirectTapMode = false
+            isStandalonePausedForMainStall = false
             currentUrl = url
             runCatching {
                 val processor = Pcm16kAudioProcessor(
                     onFramePcm = onFramePcm,
                     onSegmentPcm = onSegmentPcm,
                 )
+                activeProcessor = processor
+
                 val renderersFactory = object : DefaultRenderersFactory(context) {
                     override fun buildVideoRenderers(
                         context: Context,
@@ -464,7 +577,7 @@ class AiAudioScout(
                         allowedVideoJoiningTimeMs: Long,
                         out: ArrayList<Renderer>,
                     ) {
-                        // 不构建任何视频渲染器，彻底节省硬件视频解码器实例
+                        // 不构建任何视频渲染器，节省硬件视频解码器实例
                     }
 
                     override fun buildAudioSink(
@@ -472,8 +585,11 @@ class AiAudioScout(
                         enableFloatOutput: Boolean,
                         enableAudioOutputPlaybackParams: Boolean,
                     ): AudioSink {
-                        // 使用纯内存零硬件占用的 HeadlessAudioSink，彻底杜绝 AudioFlinger status: -12
-                        return HeadlessAudioSink(processor)
+                        return DefaultAudioSink.Builder(context)
+                            .setEnableFloatOutput(enableFloatOutput)
+                            .setEnableAudioOutputPlaybackParameters(enableAudioOutputPlaybackParams)
+                            .setAudioProcessors(arrayOf(processor))
+                            .build()
                     }
 
                     override fun buildAudioRenderers(
@@ -486,29 +602,29 @@ class AiAudioScout(
                         eventListener: AudioRendererEventListener,
                         out: ArrayList<Renderer>,
                     ) {
+                        if (FfmpegLibrary.isAvailable()) {
+                            out.add(FfmpegAudioRenderer(eventHandler, eventListener, audioSink))
+                        }
+                        val softwareOnlySelector = MediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
+                            val all = mediaCodecSelector.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+                            val sw = all.filter { it.softwareOnly || !it.hardwareAccelerated }
+                            if (sw.isNotEmpty()) sw else all
+                        }
                         super.buildAudioRenderers(
                             context,
                             extensionRendererMode,
-                            mediaCodecSelector,
+                            softwareOnlySelector,
                             enableDecoderFallback,
                             audioSink,
                             eventHandler,
                             eventListener,
                             out,
                         )
-                        if (FfmpegLibrary.isAvailable()) {
-                            out.add(FfmpegAudioRenderer(eventHandler, eventListener, audioSink))
-                        }
                     }
                 }
 
                 val loadControl = DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        /* minBufferMs = */ 1500,
-                        /* maxBufferMs = */ 8000,
-                        /* bufferForPlaybackMs = */ 500,
-                        /* bufferForPlaybackAfterRebufferMs = */ 1000,
-                    )
+                    .setBufferDurationsMs(1200, 8000, 400, 800)
                     .build()
 
                 val dataSourceFactory = OkHttpDataSource.Factory(okHttpClient).apply {
@@ -520,7 +636,6 @@ class AiAudioScout(
                     .setLoadControl(loadControl)
                     .build()
 
-                // 静音探路播放器，并禁用画面与字幕解码
                 player.volume = 0f
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                     .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
@@ -536,46 +651,66 @@ class AiAudioScout(
                             Player.STATE_ENDED -> "STATE_ENDED"
                             else -> "UNKNOWN($playbackState)"
                         }
-                        Log.i(TAG, "AiAudioScout playbackState: $stateName, isPlaying=${player.isPlaying}")
+                        Log.i(TAG, "Standalone AiAudioScout playbackState: $stateName, isPlaying=${player.isPlaying}")
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
-                        Log.w(TAG, "AiAudioScout error: ${error.errorCodeName} - ${error.message}")
-                        // 直播流瞬时波动自动重连一次
+                        Log.w(TAG, "Standalone AiAudioScout error: ${error.errorCodeName} - ${error.message}")
+                        if (processor.cumulativeAudioMs <= 0L && onStandaloneFailed != null) {
+                            // 尚未产出任何音频即报错（典型如单连接限制 HTTP 403/503）：立即通知控制器回退至主播放器直采
+                            onStandaloneFailed.invoke()
+                            return
+                        }
                         val target = currentUrl
                         if (target != null) {
                             mainHandler.postDelayed({
-                                if (currentUrl == target && exoPlayer === player) {
+                                if (currentUrl == target && exoPlayer === player && !isDirectTapMode) {
                                     runCatching {
                                         player.prepare()
-                                        player.playWhenReady = true
+                                        player.playWhenReady = !isStandalonePausedForMainStall
                                     }
                                 }
-                            }, 2000L)
+                            }, 1500L)
                         } else {
                             onScoutError(error.message ?: error.errorCodeName)
                         }
                     }
                 })
 
-                Log.i(TAG, "AiAudioScout preparing stream: $url")
+                Log.i(TAG, "Standalone AiAudioScout preparing stream: $url")
                 player.setMediaItem(MediaItem.fromUri(url))
                 player.prepare()
                 player.playWhenReady = true
                 exoPlayer = player
             }.onFailure { e ->
-                Log.e(TAG, "Failed to start AiAudioScout", e)
-                onScoutError(e.message ?: "Audio scout init failed")
+                Log.e(TAG, "Failed to start standalone AiAudioScout", e)
+                onStandaloneFailed?.invoke() ?: onScoutError(e.message ?: "Audio scout init failed")
             }
         }
     }
 
-    /** 停止并释放音频探路播放器 */
-    fun stop() {
-        mainHandler.post { stopInternal() }
+    /** 仅停止独立探路器（保留或准备切换到主播放器直采） */
+    fun stopStandaloneOnly() {
+        mainHandler.post {
+            stopStandaloneInternal()
+        }
     }
 
-    private fun stopInternal() {
+    /** 停止旁路采集与独立探路播放器 */
+    fun stop() {
+        mainHandler.post {
+            for (sink in attachedSinks) {
+                sink.activeProcessor = null
+            }
+            attachedSinks.clear()
+            activeProcessor = null
+            isDirectTapMode = false
+            isStandalonePausedForMainStall = false
+            stopStandaloneInternal()
+        }
+    }
+
+    private fun stopStandaloneInternal() {
         currentUrl = null
         exoPlayer?.run {
             runCatching { stop() }

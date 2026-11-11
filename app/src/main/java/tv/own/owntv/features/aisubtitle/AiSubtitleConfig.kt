@@ -179,7 +179,7 @@ data class AiSubtitleConfig(
     val verticalOffsetDp: Int = 0,
     /** 渲染视觉风格（电视半透明卡片 / 电影透亮无框） */
     val renderStyle: SubtitleRenderStyle = SubtitleRenderStyle.TRANSLUCENT_CARD,
-    /** 字幕时序快慢微调偏移量（毫秒，-5000ms ~ +5000ms，默认 0ms；负数表示字幕提前，正数表示字幕延后） */
+    /** 字幕时序快慢微调偏移量（毫秒，-10000ms ~ +15000ms，默认 0ms；负数表示字幕提前，正数表示字幕延后，单次播放会话级生效） */
     val syncOffsetMs: Int = 0,
     /** 设备唯一标识（用于 tvgo 协议握手） */
     val deviceId: String = "",
@@ -237,7 +237,7 @@ class AiSubtitleConfigStore(context: Context) {
             positionPreset = SubtitlePositionPreset.fromId(prefs.getString(KEY_POSITION_PRESET, null)),
             verticalOffsetDp = prefs.getInt(KEY_VERTICAL_OFFSET, 0).coerceIn(-100, 200),
             renderStyle = SubtitleRenderStyle.fromId(prefs.getString(KEY_RENDER_STYLE, null)),
-            syncOffsetMs = prefs.getInt(KEY_SYNC_OFFSET, 0).coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS),
+            syncOffsetMs = 0, // 单次播放会话级生效，启动与换台默认归零
             deviceId = devId,
         )
     }
@@ -273,14 +273,21 @@ class AiSubtitleConfigStore(context: Context) {
         _config.value = next
     }
 
-    /** 调整字幕同步偏移量（毫秒，正数延后，负数提前） */
-    fun adjustSyncOffset(deltaMs: Int) {
-        update { it.copy(syncOffsetMs = (it.syncOffsetMs + deltaMs).coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)) }
+    /** 调整字幕同步偏移量（毫秒，正数延后，负数提前），返回调整后的新偏移量 */
+    fun adjustSyncOffset(deltaMs: Int): Int {
+        var result = 0
+        update {
+            val nextOffset = (it.syncOffsetMs + deltaMs).coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)
+            result = nextOffset
+            it.copy(syncOffsetMs = nextOffset)
+        }
+        return result
     }
 
     /** 重置字幕同步偏移量至 0 毫秒 */
-    fun resetSyncOffset() {
+    fun resetSyncOffset(): Int {
         update { it.copy(syncOffsetMs = 0) }
+        return 0
     }
 
     /** 应用预设模板（保留已填写的 API Key） */
@@ -317,8 +324,8 @@ class AiSubtitleConfigStore(context: Context) {
 
         const val MIN_LEAD_SECONDS = 3
         const val MAX_LEAD_SECONDS = 12
-        const val MIN_SYNC_OFFSET_MS = -5000
-        const val MAX_SYNC_OFFSET_MS = 5000
+        const val MIN_SYNC_OFFSET_MS = -10000
+        const val MAX_SYNC_OFFSET_MS = 15000
         const val STEP_SYNC_OFFSET_MS = 500
     }
 }

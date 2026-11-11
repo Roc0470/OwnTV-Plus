@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicLong
  * @property originalText 源语言识别文本（若为直接出译文的模型则可能为空）
  * @property translatedText 目标语言翻译文本
  * @property audioStartElapsedMs 对应音频块在探路器采集时的系统时钟 (SystemClock.elapsedRealtime())
+ * @property audioPtsMs 对应音频块在探路器采集时的累计有效音频时钟（毫秒），用于与主播放器实际播放进度精准对齐
  * @property audioDurationMs 音频持续时长（毫秒）
  * @property isPartial 是否为流式增量未定稿字幕
  */
@@ -38,6 +39,7 @@ data class AiSubtitleCue(
     val originalText: String,
     val translatedText: String,
     val audioStartElapsedMs: Long,
+    val audioPtsMs: Long = 0L,
     val audioDurationMs: Long = 3000L,
     val isPartial: Boolean = false,
 )
@@ -49,8 +51,8 @@ interface AiSubtitleEngine {
     /** 启动引擎会话 */
     fun start()
 
-    /** 接收 100ms 实时 16kHz Mono 16-bit PCM 音频帧（供 WebSocket 流式引擎使用） */
-    fun onFramePcm(pcm16k: ByteArray) {}
+    /** 接收 100ms 实时 16kHz Mono 16-bit PCM 音频帧及累计音频 PTS（供 WebSocket 流式引擎使用） */
+    fun onFramePcm(pcm16k: ByteArray, audioPtsMs: Long = 0L) {}
 
     /** 接收 2.0~3.2s 完整音频切片（供 OpenAI 兼容分段引擎使用） */
     fun onSegmentPcm(chunk: Pcm16kChunk) {}
@@ -61,12 +63,6 @@ interface AiSubtitleEngine {
 
 /**
  * 引擎一：OpenAI 兼容多供应商引擎 ([OpenAiCompatEngine])。
- *
- * 支持智谱清言 (BigModel)、阿里百炼兼容接口、Google Gemini OpenAI 端点、DeepSeek 及各类 OneAPI/NewAPI 中转站：
- * - **模式 A（两阶段 ASR + LLM 翻译）**：当配置了 `asrModelName`（如 `glm-asr`、`whisper-1`、`FunAudioLLM/SenseVoiceSmall`）时，
- *   先调用 `/audio/transcriptions` 将 16kHz WAV 转为原文，再调用 `/chat/completions` 极速翻译为目标语言；
- * - **模式 B（多模态原生音频直传）**：当 `asrModelName` 留空时（如 `gemini-2.5-flash`、`qwen-omni-turbo`、`gpt-4o-audio-preview`），
- *   直接向 `/chat/completions` 发送包含 `input_audio` (Base64 WAV) 的多模态请求，一次性返回识别原文与译文。
  */
 class OpenAiCompatEngine(
     private val config: AiSubtitleConfig,
@@ -150,7 +146,6 @@ class OpenAiCompatEngine(
         val transcript = httpClient.newCall(asrReq).execute().use { resp ->
             val bodyStr = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                // 如果中转站或模型不支持 /audio/transcriptions，自动回退尝试多模态 input_audio
                 Log.w(TAG, "ASR HTTP ${resp.code}: $bodyStr, falling back to multimodal chat")
                 processMultimodalAudioChat(chunk)
                 return
@@ -161,7 +156,6 @@ class OpenAiCompatEngine(
         if (transcript.isBlank() || isHallucination(transcript)) return
 
         val cueId = "oa-${seqCounter.getAndIncrement()}"
-        // 先立即推送原文预览，再异步补齐译文（若开启了显示原文）
         if (config.showOriginal) {
             onCueReady(
                 AiSubtitleCue(
@@ -169,6 +163,7 @@ class OpenAiCompatEngine(
                     originalText = transcript,
                     translatedText = "",
                     audioStartElapsedMs = chunk.startElapsedMs,
+                    audioPtsMs = chunk.audioPtsMs,
                     audioDurationMs = chunk.durationMs,
                     isPartial = true,
                 ),
@@ -189,6 +184,7 @@ class OpenAiCompatEngine(
                 originalText = transcript,
                 translatedText = translated,
                 audioStartElapsedMs = chunk.startElapsedMs,
+                audioPtsMs = chunk.audioPtsMs,
                 audioDurationMs = chunk.durationMs,
                 isPartial = false,
             ),
@@ -197,7 +193,6 @@ class OpenAiCompatEngine(
 
     /**
      * 模式 B：多模态 `/chat/completions` (`input_audio` Base64 WAV 直传)
-     * 适用于 Gemini 2.0/2.5 Flash、Qwen-Omni、GPT-4o-audio 及支持音频输入的 OneAPI 中转站。
      */
     private fun processMultimodalAudioChat(chunk: Pcm16kChunk) {
         val baseUrl = normalizedBaseUrl()
@@ -290,6 +285,7 @@ class OpenAiCompatEngine(
                 originalText = orig,
                 translatedText = trans,
                 audioStartElapsedMs = chunk.startElapsedMs,
+                audioPtsMs = chunk.audioPtsMs,
                 audioDurationMs = chunk.durationMs,
                 isPartial = false,
             ),
@@ -394,17 +390,10 @@ class OpenAiCompatEngine(
 /**
  * 引擎二：OpenAI Realtime / 阿里百炼 (`qwen3.8-livetranslate-flash-realtime`) / TVGO WebSocket 引擎 ([RealtimeWsEngine])。
  *
- * 1:1 还原自 `VsTV` (`v2.8.0` `Lr3/A`, `Lr3/z`, `Lr3/f`) 逆向出的 WebSocket 协议：
- * 1. 连接握手：
- *    - 阿里百炼 / OpenAI Realtime：收到 `session.created` 后发送 `session.update`：
- *      `{"type":"session.update","session":{"output_modalities":["text"],"translation":{"language":"zh"}}}`
- *    - TVGO：连接 `ws://host:port/ai?device={deviceId}`
- * 2. 实时音频流推送：
- *    - 将 16000Hz Mono 16-bit PCM 编码为 Base64，持续发送 `{"type":"input_audio_buffer.append","audio":"..."}`
- * 3. 响应解析与时间戳对齐：
- *    - `input_audio_buffer.speech_started` (`audio_start_ms`)：记录当前语句相对于会话启动的音频起点偏移；
- *    - `conversation.item.input_audio_transcription.delta` / `.completed`：源语言识别原文；
- *    - `response.text.delta` / `.done` 或 `response.audio_transcript.delta` / `.done`：翻译后的目标语言字幕。
+ * 采用精确的音频 PTS 时钟锚定机制 ([latestFedAudioPtsMs] & [currentSpeechAudioPtsMs])：
+ * - 每帧 100ms PCM 携带探路器的累计有效音频时长 `audioPtsMs`；
+ * - 无论是服务端 `speech_started` 还是译文标点流式切句，每句字幕均严格绑定其对应语音被采集时的 `audioPtsMs`，
+ *   彻底修复以往 `finalizeCurrentSentence()` 用系统当前时间覆盖语音起点时间戳的缺陷。
  */
 class RealtimeWsEngine(
     private val config: AiSubtitleConfig,
@@ -414,9 +403,22 @@ class RealtimeWsEngine(
 
     private val running = AtomicBoolean(false)
     private val sessionConfigured = AtomicBoolean(false)
+    private val reconnecting = AtomicBoolean(false)
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var webSocket: WebSocket? = null
     private var sessionStartElapsedMs = 0L
     private var currentSpeechStartElapsedMs = 0L
+    private var lastActivityOrCommitMs = 0L
+    private val framesSentCounter = AtomicLong(0L)
+
+    /** 最新送入 WebSocket 的累计音频 PTS（毫秒） */
+    @Volatile private var latestFedAudioPtsMs = 0L
+    /** 当前 WebSocket 会话建立时的基准音频 PTS（毫秒） */
+    @Volatile private var sessionBaseAudioPtsMs = 0L
+    /** 当前正在累积的短句对应的起始音频 PTS（毫秒） */
+    @Volatile private var currentSpeechAudioPtsMs = 0L
+    /** 当前短句是否已锁定语音起点 PTS */
+    @Volatile private var hasSpeechAnchor = false
 
     private val partialOriginal = StringBuilder()
     private val partialTranslated = StringBuilder()
@@ -426,7 +428,7 @@ class RealtimeWsEngine(
     private val wsClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS) // WebSocket 长连接不设读取超时
+            .readTimeout(0, TimeUnit.MILLISECONDS)
             .pingInterval(15, TimeUnit.SECONDS)
             .build()
     }
@@ -434,9 +436,31 @@ class RealtimeWsEngine(
     override fun start() {
         running.set(true)
         sessionConfigured.set(false)
+        reconnecting.set(false)
         sessionStartElapsedMs = SystemClock.elapsedRealtime()
         currentSpeechStartElapsedMs = sessionStartElapsedMs
+        lastActivityOrCommitMs = sessionStartElapsedMs
+        latestFedAudioPtsMs = 0L
+        sessionBaseAudioPtsMs = 0L
+        currentSpeechAudioPtsMs = 0L
+        hasSpeechAnchor = false
+        framesSentCounter.set(0L)
         connectWebSocket()
+    }
+
+    private fun scheduleReconnect(delayMs: Long = 800L) {
+        if (!running.get()) return
+        if (!reconnecting.compareAndSet(false, true)) return
+        sessionConfigured.set(false)
+        mainHandler.postDelayed({
+            reconnecting.set(false)
+            if (running.get()) {
+                Log.i(TAG, "Auto-reconnecting Realtime WebSocket...")
+                webSocket?.runCatching { cancel() }
+                webSocket = null
+                connectWebSocket()
+            }
+        }, delayMs)
     }
 
     private fun buildWsUrl(): String {
@@ -445,7 +469,6 @@ class RealtimeWsEngine(
             val sep = if (base.contains("?")) "&" else "?"
             return "${base}${sep}device=${config.deviceId}"
         }
-        // 阿里百炼或 OpenAI Realtime WebSocket
         var base = config.apiBaseUrl.trim()
         if (base.startsWith("https://")) base = "wss://" + base.removePrefix("https://")
         if (base.startsWith("http://")) base = "ws://" + base.removePrefix("http://")
@@ -478,10 +501,11 @@ class RealtimeWsEngine(
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     sessionStartElapsedMs = SystemClock.elapsedRealtime()
-                    Log.i(TAG, "Realtime WebSocket connected. Awaiting session.created...")
+                    lastActivityOrCommitMs = sessionStartElapsedMs
+                    sessionBaseAudioPtsMs = latestFedAudioPtsMs
+                    Log.i(TAG, "Realtime WebSocket connected (basePts=${sessionBaseAudioPtsMs}ms). Awaiting session.created...")
                     onEngineStatus("Realtime 连接成功，正在初始化会话...")
                     if (config.provider == AiSubtitleProvider.TVGO) {
-                        // TVGO 协议连上即就绪
                         sessionConfigured.set(true)
                         onEngineStatus("TVGO 实时字幕流已就绪")
                     }
@@ -494,24 +518,52 @@ class RealtimeWsEngine(
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.w(TAG, "Realtime WebSocket failure: ${t.message}", t)
                     sessionConfigured.set(false)
-                    onEngineStatus("连接中断: ${t.message ?: "网络异常"}")
+                    if (running.get()) {
+                        onEngineStatus("正在自动重连同传服务...")
+                        scheduleReconnect(1000L)
+                    }
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.i(TAG, "Realtime WebSocket closed: code=$code, reason=$reason")
                     sessionConfigured.set(false)
+                    if (running.get()) {
+                        scheduleReconnect(800L)
+                    }
                 }
             },
         )
     }
 
-    /**
-     * 发送 session.update 会话配置包（收到 session.created 后调用且仅调用一次）
-     */
     private fun sendSessionUpdate(ws: WebSocket) {
         val sessionObj = JSONObject().apply {
             put("output_modalities", JSONArray().put("text"))
-            put("voice", "Tina") // 百炼 LiveTranslate 官方默认 preset 音色
+            put("voice", "Tina")
+            put("enable_voice_clone", false)
+            put(
+                "audio",
+                JSONObject().apply {
+                    put(
+                        "input",
+                        JSONObject().apply {
+                            put(
+                                "format",
+                                JSONObject().apply {
+                                    put("type", "pcm")
+                                    put("sample_rate", 16000)
+                                },
+                            )
+                        },
+                    )
+                },
+            )
+            put(
+                "turn_detection",
+                JSONObject().apply {
+                    put("type", "speaker_detection")
+                    put("threshold", 0.5)
+                },
+            )
             put(
                 "translation",
                 JSONObject().apply {
@@ -535,7 +587,8 @@ class RealtimeWsEngine(
         ws.send(root.toString())
     }
 
-    override fun onFramePcm(pcm16k: ByteArray) {
+    override fun onFramePcm(pcm16k: ByteArray, audioPtsMs: Long) {
+        latestFedAudioPtsMs = audioPtsMs
         if (!running.get() || !sessionConfigured.get()) return
         val ws = webSocket ?: return
         val b64 = Base64.encodeToString(pcm16k, Base64.NO_WRAP)
@@ -544,6 +597,33 @@ class RealtimeWsEngine(
             put("audio", b64)
         }
         ws.send(msg.toString())
+        val count = framesSentCounter.incrementAndGet()
+        if (count == 1L || count % 30L == 0L) {
+            Log.i(TAG, "RealtimeWsEngine sent $count audio frames (${count / 10.0}s, pts=${audioPtsMs}ms)")
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastActivityOrCommitMs > 45_000L) {
+            lastActivityOrCommitMs = now
+            Log.i(TAG, "Proactive session refresh at 45s to avoid Bailian 60s response stream timeout")
+            if (partialTranslated.isNotEmpty() || partialOriginal.isNotEmpty()) {
+                finalizeCurrentSentence()
+            }
+            scheduleReconnect(100L)
+        }
+    }
+
+    /** 确保当前正在生成的短句已锁定准确的起始音频 PTS */
+    private fun ensureSpeechAnchor(serverAudioStartMs: Long = -1L) {
+        if (hasSpeechAnchor) return
+        hasSpeechAnchor = true
+        currentSpeechStartElapsedMs = SystemClock.elapsedRealtime()
+        val rawPts = if (serverAudioStartMs >= 0L) {
+            (sessionBaseAudioPtsMs + serverAudioStartMs).coerceAtMost(latestFedAudioPtsMs)
+        } else {
+            // 识别/翻译首包到达时，对应语音大约在 900ms 前送入
+            (latestFedAudioPtsMs - 900L).coerceAtLeast(0L)
+        }
+        currentSpeechAudioPtsMs = rawPts.coerceAtLeast(currentSpeechAudioPtsMs)
     }
 
     private fun handleServerEvent(rawJson: String) {
@@ -558,71 +638,104 @@ class RealtimeWsEngine(
                 "session.updated" -> {
                     Log.i(TAG, "Received session.updated. Session configured successfully!")
                     sessionConfigured.set(true)
+                    sessionBaseAudioPtsMs = latestFedAudioPtsMs
+                    lastActivityOrCommitMs = SystemClock.elapsedRealtime()
                     onEngineStatus("AI 实时同传已就绪 (${config.modelName})")
                 }
                 "input_audio_buffer.speech_started" -> {
                     val audioStartMs = evt.optLong("audio_start_ms", -1L)
-                    currentSpeechStartElapsedMs = if (audioStartMs >= 0L) {
-                        sessionStartElapsedMs + audioStartMs
-                    } else {
-                        SystemClock.elapsedRealtime()
+                    if (partialTranslated.isEmpty() && partialOriginal.isEmpty()) {
+                        hasSpeechAnchor = false
+                        ensureSpeechAnchor(audioStartMs)
                     }
-                    finalizeCurrentSentence()
+                    Log.i(TAG, "Server event: speech_started (audio_start_ms=$audioStartMs, anchorPts=$currentSpeechAudioPtsMs)")
                 }
-                "conversation.item.created", "response.created" -> {
-                    // 当新的一轮推理或新对话项生成时，如果上一句已有翻译内容，先平滑结算定稿
-                    if (partialTranslated.isNotEmpty() || partialOriginal.isNotEmpty()) {
+                "input_audio_buffer.speech_stopped", "conversation.item.created" -> {
+                    Log.i(TAG, "Server event: $type")
+                }
+                "response.created" -> {
+                    lastActivityOrCommitMs = SystemClock.elapsedRealtime()
+                    if (partialTranslated.isNotEmpty()) {
                         finalizeCurrentSentence()
                     }
+                    Log.i(TAG, "Server event: response.created")
                 }
                 "conversation.item.input_audio_transcription.delta" -> {
                     val delta = evt.optString("delta", "")
                     if (delta.isNotEmpty()) {
-                        // 译文驱动原则：英文 ASR 仅流式累积原文，绝不能因英文标点提前切断未完成的中文翻译
+                        ensureSpeechAnchor()
                         partialOriginal.append(delta)
                         emitCurrentCue(isPartial = true)
                     }
                 }
+                "conversation.item.input_audio_transcription.text" -> {
+                    val full = (evt.optString("text", "") + evt.optString("stash", "")).trim()
+                    if (full.isNotEmpty()) {
+                        ensureSpeechAnchor()
+                        partialOriginal.setLength(0)
+                        partialOriginal.append(full)
+                        emitCurrentCue(isPartial = true)
+                    }
+                }
                 "conversation.item.input_audio_transcription.completed" -> {
-                    val transcript = evt.optString("transcript", "")
-                    if (transcript.isNotBlank()) {
+                    val transcript = evt.optString("transcript", "").ifBlank { evt.optString("text", "") }
+                    Log.i(TAG, "ASR completed [$activeCueId]: ${transcript.trim()}")
+                    if (transcript.isNotBlank() && partialTranslated.isNotEmpty()) {
                         partialOriginal.setLength(0)
                         partialOriginal.append(transcript.trim())
                         emitCurrentCue(isPartial = true)
                     }
                 }
                 "response.text.delta", "response.audio_transcript.delta", "response.output_text.delta" -> {
-                    val delta = evt.optString("delta", "")
+                    val delta = evt.optString("delta", "").ifEmpty { evt.optString("text", "") }
                     if (delta.isNotEmpty()) {
-                        // 译文驱动切句：仅当中文字符串已以句末标点（。！？；）完整结束，新到 delta 为下一句首字时触发切句
                         if (shouldSplitByTranslation(partialTranslated.toString())) {
                             finalizeCurrentSentence()
                         }
+                        ensureSpeechAnchor()
                         partialTranslated.append(delta)
+                        Log.i(TAG, "Translation delta [$activeCueId, pts=${currentSpeechAudioPtsMs}ms]: '${partialTranslated}'")
                         emitCurrentCue(isPartial = true)
                     }
                 }
-                "response.inference_unit_finished", "response.output_item.done", "response.content_part.done",
-                "response.text.done", "response.audio_transcript.done", "response.output_text.done",
-                "response.done", "input_audio_buffer.speech_stopped" -> {
-                    val fullText = evt.optString("text", "").ifBlank { evt.optString("transcript", "") }
-                    if (fullText.isNotBlank()) {
+                "response.text.text", "response.audio_transcript.text" -> {
+                    val full = (evt.optString("text", "") + evt.optString("stash", "")).trim()
+                    if (full.isNotEmpty()) {
+                        ensureSpeechAnchor()
                         partialTranslated.setLength(0)
-                        partialTranslated.append(fullText.trim())
+                        partialTranslated.append(full)
+                        Log.i(TAG, "Translation text [$activeCueId, pts=${currentSpeechAudioPtsMs}ms]: '${partialTranslated}'")
+                        emitCurrentCue(isPartial = true)
                     }
-                    // 仅当中文已生成或说话彻底停止时，才结算定稿，防止腰斩等待中的中文
-                    if (partialTranslated.isNotEmpty() || type == "input_audio_buffer.speech_stopped") {
+                }
+                "response.inference_unit_finished" -> {
+                    lastActivityOrCommitMs = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "Inference unit finished [$activeCueId]: '${partialTranslated}'")
+                    if (partialTranslated.isNotEmpty()) {
                         finalizeCurrentSentence()
+                    }
+                }
+                "response.output_item.done", "response.content_part.done",
+                "response.text.done", "response.audio_transcript.done", "response.output_text.done",
+                "response.done" -> {
+                    lastActivityOrCommitMs = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "Response turn done [$type, $activeCueId]")
+                    if (partialTranslated.isNotEmpty()) {
+                        finalizeCurrentSentence()
+                    } else {
+                        partialOriginal.setLength(0)
+                        hasSpeechAnchor = false
                     }
                 }
                 "error" -> {
                     val errMsg = evt.optJSONObject("error")?.optString("message") ?: evt.optString("message", "未知错误")
                     Log.w(TAG, "Realtime server error: $errMsg (raw: $rawJson)")
-                    onEngineStatus("服务端错误: $errMsg")
+                    if (running.get()) {
+                        scheduleReconnect(500L)
+                    }
                 }
                 else -> {
-                    // 其他心跳或上下文事件，输出 debug 日志以便追踪百炼原生协议帧
-                    Log.d(TAG, "Server event: $type -> ${rawJson.take(150)}")
+                    Log.i(TAG, "Server event [$type]: ${rawJson.take(200)}")
                 }
             }
         }.onFailure { err ->
@@ -630,12 +743,6 @@ class RealtimeWsEngine(
         }
     }
 
-    /**
-     * 译文驱动切句判断：
-     * 1. 中文译文末尾有明确句末标点（。！？；），且已有至少 4 个汉字；
-     * 2. 超长句子保护：中文连续超过 24 个汉字且遇逗号（，,）或空格时分句，严格控制在两行以内；
-     * 3. 绝不以英文 ASR 标点作为切句依据，防止英文过快切断未完成的中文。
-     */
     private fun shouldSplitByTranslation(transText: String): Boolean {
         val trans = transText.trimEnd()
         if (trans.length >= 4) {
@@ -654,19 +761,21 @@ class RealtimeWsEngine(
     }
 
     /**
-     * 将当前累积的短句定稿发送至上屏队列，并安全重置缓冲区准备接收下一个短句。
+     * 将当前累积的短句定稿发送至上屏队列，并安全推进下一短句的音频 PTS 锚点。
      */
     private fun finalizeCurrentSentence() {
         val orig = if (config.showOriginal) partialOriginal.toString().trim() else ""
         val trans = partialTranslated.toString().trim()
         if (orig.isNotEmpty() || trans.isNotEmpty()) {
+            ensureSpeechAnchor()
             onCueReady(
                 AiSubtitleCue(
                     id = activeCueId,
                     originalText = orig,
                     translatedText = trans,
                     audioStartElapsedMs = currentSpeechStartElapsedMs,
-                    audioDurationMs = 2800L,
+                    audioPtsMs = currentSpeechAudioPtsMs,
+                    audioDurationMs = 3500L,
                     isPartial = false,
                 ),
             )
@@ -674,6 +783,9 @@ class RealtimeWsEngine(
         partialOriginal.setLength(0)
         partialTranslated.setLength(0)
         activeCueId = "rt-${cueCounter.getAndIncrement()}"
+        hasSpeechAnchor = false
+        // 为连续长语音的下一句预置合理的最低起始 PTS（不倒退）
+        currentSpeechAudioPtsMs = (latestFedAudioPtsMs - 800L).coerceAtLeast(currentSpeechAudioPtsMs + 300L)
         currentSpeechStartElapsedMs = SystemClock.elapsedRealtime()
     }
 
@@ -682,13 +794,15 @@ class RealtimeWsEngine(
         val trans = partialTranslated.toString().trim()
         if (orig.isEmpty() && trans.isEmpty()) return
 
+        ensureSpeechAnchor()
         onCueReady(
             AiSubtitleCue(
                 id = activeCueId,
                 originalText = orig,
                 translatedText = trans,
                 audioStartElapsedMs = currentSpeechStartElapsedMs,
-                audioDurationMs = 2800L,
+                audioPtsMs = currentSpeechAudioPtsMs,
+                audioDurationMs = 3500L,
                 isPartial = isPartial,
             ),
         )
@@ -697,6 +811,8 @@ class RealtimeWsEngine(
     override fun stop() {
         running.set(false)
         sessionConfigured.set(false)
+        reconnecting.set(false)
+        mainHandler.removeCallbacksAndMessages(null)
         webSocket?.runCatching { close(1000, "Stopped by user") }
         webSocket = null
     }

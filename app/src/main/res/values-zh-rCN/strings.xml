@@ -7,4 +7,6 @@
     <string name="player_ai_subtitle_toggle_on">开启 AI 实时字幕（延迟直播同步）</string>
     <string name="player_ai_subtitle_toggle_off">关闭 AI 实时字幕</string>
     <string name="player_ai_subtitle_settings">AI 字幕与多模型设置（支持手机扫码）…</string>
+    <string name="player_ai_subtitle_timing_nudge">AI 字幕快慢微调 (◀提前 / ▶延后)</string>
+    <string name="player_ai_subtitle_sync_now">立即对齐当前语音 (消除卡顿抢跑)</string>
 </resources>

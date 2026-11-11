@@ -4,7 +4,7 @@
 # to the version pinned here — so `kotlin` is what actually compiles the app. Keep the Compose
 # compiler plugin on this exact version. Verified 2026-09-14 on 9.4.0 / 2.4.20, in all three repos
 # together: they share one composite build and Gradle cannot mix two AGP or Kotlin versions across it.
-agp = "9.4.0"
+agp = "9.5.1"
 kotlin = "2.4.20"
 
 # --- AndroidX / Jetpack ---

@@ -7,4 +7,6 @@
     <string name="player_ai_subtitle_toggle_on">AI Live Subtitle (Delayed Live Sync)</string>
     <string name="player_ai_subtitle_toggle_off">Turn off AI Live Subtitle</string>
     <string name="player_ai_subtitle_settings">AI Subtitle &amp; Model Settings (QR Scan)…</string>
+    <string name="player_ai_subtitle_timing_nudge">AI Subtitle timing (◀ Earlier / ▶ Later)</string>
+    <string name="player_ai_subtitle_sync_now">Sync to current speech now</string>
 </resources>

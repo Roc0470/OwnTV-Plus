@@ -22,3 +22,18 @@
 #     EpgAutoRefresh, PlaylistAutoRefresh, ...) round-trip through Enum.name/valueOf.
 #     Renaming a constant would silently reset settings and break old backups. ---
 -keep enum tv.own.owntv.** { *; }
+
+# --- AI Subtitle PCM Tap: keep LivePreviewEngine player field and Media3 AudioSink fields ---
+-keepclassmembers class tv.own.owntv.player.LivePreviewEngine {
+    androidx.media3.exoplayer.ExoPlayer player;
+}
+-keepclassmembers class androidx.media3.exoplayer.audio.MediaCodecAudioRenderer {
+    androidx.media3.exoplayer.audio.AudioSink audioSink;
+}
+-keepclassmembers class androidx.media3.exoplayer.audio.DecoderAudioRenderer {
+    androidx.media3.exoplayer.audio.AudioSink audioSink;
+}
+-keepclassmembers class androidx.media3.exoplayer.audio.ForwardingAudioSink {
+    androidx.media3.exoplayer.audio.AudioSink sink;
+}
+
