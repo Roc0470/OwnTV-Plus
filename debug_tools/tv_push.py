@@ -73,8 +73,11 @@ def find_latest_apk(specified_path=None):
     # 搜索 app/build/outputs/apk/
     candidates = []
     for pattern in [
+        "app/build/outputs/apk/*/*/*.apk",
+        "app/build/outputs/apk/*/*.apk",
         "app/build/outputs/apk/release/*.apk",
         "app/build/outputs/apk/debug/*.apk",
+        "build/outputs/apk/*/*/*.apk",
         "build/outputs/apk/release/*.apk",
         "build/outputs/apk/debug/*.apk",
         "*.apk"

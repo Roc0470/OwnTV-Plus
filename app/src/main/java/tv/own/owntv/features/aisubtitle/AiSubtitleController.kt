@@ -48,7 +48,7 @@ sealed interface AiSubtitleState {
  */
 @UnstableApi
 class AiSubtitleController(
-    context: Context,
+    private val context: Context,
     private val ownTVPlayer: OwnTVPlayer,
     private val livePreviewEngine: LivePreviewEngine,
 ) {
@@ -92,6 +92,10 @@ class AiSubtitleController(
         )
     }
 
+    /** 当前是否处于主播放器内存直采回退模式（false 表示独立超前探路模式） */
+    val isDirectTapMode: Boolean
+        get() = scout?.isDirectTapMode == true
+
     /** 是否已开启 AI 字幕（含准备中与运行中） */
     val isEnabled: Boolean
         get() = _state.value !is AiSubtitleState.Off
@@ -99,18 +103,22 @@ class AiSubtitleController(
     /**
      * 切换 AI 实时字幕开关。
      */
-    fun toggle(playbackEngine: PlaybackEngine, fallbackStreamUrl: String? = null) {
+    fun toggle(playbackEngine: PlaybackEngine, fallbackStreamUrl: String? = null, headers: Map<String, String>? = null) {
         if (isEnabled) {
             stop()
         } else {
-            start(playbackEngine, fallbackStreamUrl)
+            start(playbackEngine, fallbackStreamUrl, headers)
         }
     }
 
     /**
      * 启动 AI 实时字幕与超前对齐流水线。
      */
-    fun start(playbackEngine: PlaybackEngine, fallbackStreamUrl: String? = null) {
+    fun start(
+        playbackEngine: PlaybackEngine,
+        fallbackStreamUrl: String? = null,
+        headers: Map<String, String>? = null,
+    ) {
         val cfg = configStore.config.value
         if (!cfg.isConfigured) {
             _state.value = AiSubtitleState.Error("请先在「AI 字幕设置」中配置 API Key 或扫码填入")
@@ -152,20 +160,34 @@ class AiSubtitleController(
         engine = newEngine
         newEngine.start()
 
-        // 2. 启动独立超前探路器；若遇单连接限制失败则无缝回退至主播放器旁路直采
+        // 2. 检查工作模式：若为单连接直采模式或已知单连接限制源，直接启动直采保活，避免二次连接冲突踢线
+        val isSingleSessionKnown = tv.own.owntv.player.LiveStreamQuirks.isSingleSession(streamUrl)
+        val shouldDirectTap = cfg.captureMode == AiSubtitleCaptureMode.DIRECT_TAP ||
+            (cfg.captureMode == AiSubtitleCaptureMode.AUTO && isSingleSessionKnown)
+
+        if (shouldDirectTap) {
+            Log.i(TAG, "Direct tap mode selected upfront: captureMode=${cfg.captureMode}, isSingleSession=$isSingleSessionKnown")
+            fallbackToDirectTap(if (isSingleSessionKnown) "检测到单连接限制源，已自动启用直采保活模式" else "单连接直采保活模式已启动")
+            startTickerJob()
+            return
+        }
+
+        // 3. 启动独立超前探路器；若遇单连接限制失败则无缝回退至主播放器旁路直采
         val leadSecs = cfg.leadSeconds.coerceIn(AiSubtitleConfigStore.MIN_LEAD_SECONDS, AiSubtitleConfigStore.MAX_LEAD_SECONDS)
         val targetLeadMs = leadSecs * 1000L
 
         scout?.startStandalone(
             url = streamUrl,
+            headers = headers,
             onStandaloneFailed = {
+                tv.own.owntv.player.LiveStreamQuirks.rememberSessionLimit(streamUrl)
                 scope.launch {
-                    fallbackToDirectTap("直播源限制单连接，已自动切换为主播放器直采模式")
+                    fallbackToDirectTap("检测到单连接限制或建连失败，已自动切换为主播放器直采模式")
                 }
             },
         )
 
-        // 3. 启动主画面延迟直播准备协程（等待探路器产出真实超前音频后再恢复主画面播放）
+        // 4. 启动主画面延迟直播准备协程（等待探路器产出真实超前音频后再恢复主画面播放）
         prepareJob = scope.launch {
             pausedMainPlayerForLead = false
 
@@ -190,9 +212,9 @@ class AiSubtitleController(
 
             _state.value = AiSubtitleState.Preparing(secondsLeft = leadSecs, leadSeconds = leadSecs)
 
-            // 阶段 A：等待独立探路器连接成功并产出第一帧音频（最多等待 3.8 秒，超时说明单连接源冲突，立即回退直采）
+            // 阶段 A：等待独立探路器连接成功并产出第一帧音频（最多等待 8.0 秒，超时说明单连接源冲突或代理较慢，自动回退直采）
             var connectWaitMs = 0L
-            while (connectWaitMs < 3800L && (scout?.decodedAudioMs ?: 0L) < 100L && scout?.isDirectTapMode != true) {
+            while (connectWaitMs < 8000L && (scout?.decodedAudioMs ?: 0L) < 100L && scout?.isDirectTapMode != true) {
                 delay(100L)
                 connectWaitMs += 100L
             }
@@ -200,14 +222,15 @@ class AiSubtitleController(
             if (scout?.isDirectTapMode == true || (scout?.decodedAudioMs ?: 0L) < 100L) {
                 keepPausedJob.cancel()
                 if (scout?.isDirectTapMode != true) {
-                    fallbackToDirectTap("已自动切换为主播放器零冲突直采模式")
+                    tv.own.owntv.player.LiveStreamQuirks.rememberSessionLimit(streamUrl)
+                    fallbackToDirectTap("探路建连超时，已自动切换为主播放器零冲突直采模式")
                 }
                 return@launch
             }
 
             // 阶段 B：探路器已正常解码音频，继续按住主画面直到攒足 targetLeadMs 真实音频超前量
             var holdElapsedMs = 0L
-            val maxHoldWallMs = targetLeadMs + 2500L
+            val maxHoldWallMs = targetLeadMs + 3500L
             while (holdElapsedMs < maxHoldWallMs && scout?.isDirectTapMode != true) {
                 val decodedMs = scout?.decodedAudioMs ?: 0L
                 if (decodedMs >= targetLeadMs) break
@@ -229,10 +252,15 @@ class AiSubtitleController(
             pausedMainPlayerForLead = false
             mainPlayedPtsMs = 0L
             lastTickElapsedMs = SystemClock.elapsedRealtime()
-            _state.value = AiSubtitleState.Running("AI 实时同传已开启，正在同步收听...")
+            _state.value = AiSubtitleState.Running("AI 延迟直播对齐已就绪，正在同步收听...")
         }
 
-        // 4. 启动 100ms 精度双时钟推进与字幕时间轴门禁协程
+        // 5. 启动 100ms 精度双时钟推进与字幕时间轴门禁协程
+        startTickerJob()
+    }
+
+    private fun startTickerJob() {
+        cueTickerJob?.cancel()
         var tickCount = 0
         cueTickerJob = scope.launch {
             while (true) {
@@ -257,7 +285,7 @@ class AiSubtitleController(
         scout?.stopStandaloneOnly()
 
         val eng = boundPlaybackEngine
-        if (pausedMainPlayerForLead && eng != null && !eng.isPlaying.value) {
+        if (eng != null && !eng.isPlaying.value) {
             runCatching { eng.togglePlayPause() }
         }
         pausedMainPlayerForLead = false
@@ -274,14 +302,18 @@ class AiSubtitleController(
     /**
      * 当用户换台 (Zap) 或流地址变化时调用：若 AI 字幕处于开启状态，自动切换到新频道重新探路与对齐。
      */
-    fun onStreamChanged(playbackEngine: PlaybackEngine, newStreamUrl: String?) {
+    fun onStreamChanged(
+        playbackEngine: PlaybackEngine,
+        newStreamUrl: String?,
+        headers: Map<String, String>? = null,
+    ) {
         if (!isEnabled) return
         if (newStreamUrl.isNullOrBlank()) {
             stop()
             return
         }
         if (newStreamUrl != activeStreamUrl || playbackEngine !== boundPlaybackEngine) {
-            start(playbackEngine, newStreamUrl)
+            start(playbackEngine, newStreamUrl, headers)
         }
     }
 
@@ -323,6 +355,13 @@ class AiSubtitleController(
      * 调整字幕同步偏移量（毫秒，正数延后，负数提前），并立即在 60 秒时间轴窗口上重算对齐上屏。
      */
     fun adjustSyncOffset(deltaMs: Int): Int {
+        if (scout?.isDirectTapMode == true && deltaMs < 0) {
+            android.widget.Toast.makeText(
+                context,
+                "当前处于直采保活模式（主画面无延迟），大模型同传翻译约有 1.5 秒网络推理耗时，无法提前未生成的译文。如需音画精准对齐，请在设置中开启【延迟探路】模式",
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
         val newOffset = configStore.adjustSyncOffset(deltaMs)
         Log.i(TAG, "adjustSyncOffset: delta=${deltaMs}ms, newOffset=${newOffset}ms, mainPlayedPts=${mainPlayedPtsMs}ms")
         tickCueDisplay(forceImmediate = true)
@@ -505,10 +544,16 @@ class AiSubtitleController(
             return
         }
 
-        // 4. 跨句翻篇：检查当前屏幕上的中文是否已满足 1.8 秒保底阅读驻留时长
+        // 4. 跨句翻篇：长句模式下保底驻留 MIN_TRANSLATION_DISPLAY_MS（4.5秒）；
+        // 若下一大段长句已经译出超过 8 个字，则当前长句满 2.8 秒即可平滑让位翻篇，兼顾从容阅读与实时跟进
         val currentHasChinese = current != null && current.translatedText.isNotBlank()
         val currentDisplayDuration = now - activeCueStartElapsedMs
-        val isLockedByMinDisplay = currentHasChinese && currentDisplayDuration < MIN_TRANSLATION_DISPLAY_MS
+        val effectiveMinHoldMs = if (targetCue != null && current != null && targetCue.id != current.id && targetCue.translatedText.length >= 8) {
+            ACTIVE_NEXT_PARAGRAPH_HOLD_MS
+        } else {
+            MIN_TRANSLATION_DISPLAY_MS
+        }
+        val isLockedByMinDisplay = currentHasChinese && currentDisplayDuration < effectiveMinHoldMs
 
         if (!isLockedByMinDisplay && targetCue != null) {
             if (current == null || targetCue.id != current.id) {
@@ -551,15 +596,17 @@ class AiSubtitleController(
 
     companion object {
         private const val TAG = "AiSubtitleController"
-        /** 时间轴环形缓冲区最大保留条数（约覆盖 60 秒历史与待播字幕） */
+        /** 时间轴环形缓冲区最大保留条数（覆盖 60 秒历史与待播长句字幕） */
         private const val MAX_TIMELINE_CUES = 60
         /** 历史字幕回溯保留时长（60 秒） */
         private const val HISTORY_WINDOW_MS = 60_000L
-        /** 单条字幕在时间轴上的最大有效驻留跨度（10 秒） */
-        private const val MAX_CUE_LIFETIME_MS = 10_000L
-        /** 中文译文保底安全阅读时长，彻底杜绝快语速下一闪而过 */
-        private const val MIN_TRANSLATION_DISPLAY_MS = 1800L
-        /** 静音停顿后平滑消隐时间（8.5 秒，覆盖句间正常同传推理间隔） */
-        private const val SILENCE_FADE_OUT_MS = 8500L
+        /** 单条长句字幕在时间轴上的最大有效驻留跨度（14 秒） */
+        private const val MAX_CUE_LIFETIME_MS = 14_000L
+        /** 大段长句译文标准保底阅读驻留时长（4.5 秒） */
+        private const val MIN_TRANSLATION_DISPLAY_MS = 4500L
+        /** 当下一大段长句已累积满 8 字时的平滑让位驻留时长（2.8 秒） */
+        private const val ACTIVE_NEXT_PARAGRAPH_HOLD_MS = 2800L
+        /** 静音停顿后平滑消隐时间（10.0 秒，防止句间或段落停顿闪烁） */
+        private const val SILENCE_FADE_OUT_MS = 10_000L
     }
 }

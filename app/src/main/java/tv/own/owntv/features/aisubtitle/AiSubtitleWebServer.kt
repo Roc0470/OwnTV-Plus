@@ -304,6 +304,7 @@ class AiSubtitleWebServer(
         configStore.update { cur ->
             cur.copy(
                 provider = AiSubtitleProvider.fromId(obj.optString("provider", cur.provider.id)),
+                captureMode = AiSubtitleCaptureMode.fromId(obj.optString("captureMode", cur.captureMode.id)),
                 apiBaseUrl = obj.optString("apiBaseUrl", cur.apiBaseUrl).trim(),
                 apiKey = obj.optString("apiKey", cur.apiKey).trim(),
                 modelName = obj.optString("modelName", cur.modelName).trim(),

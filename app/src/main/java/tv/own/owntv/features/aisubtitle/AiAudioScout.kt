@@ -461,12 +461,28 @@ class AiAudioScout(
         get() = activeProcessor?.cumulativeAudioMs ?: 0L
 
     private val okHttpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(12, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .build()
+        val base = runCatching {
+            org.koin.core.context.GlobalContext.get().get<tv.own.owntv.core.network.StreamingHttpClient>().client
+        }.getOrElse {
+            runCatching {
+                org.koin.core.context.GlobalContext.get().get<OkHttpClient>()
+            }.getOrNull()
+        }
+        if (base != null) {
+            base.newBuilder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+        } else {
+            OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+        }
     }
 
     /**
@@ -542,13 +558,20 @@ class AiAudioScout(
         return null
     }
 
+    /** 兼容旧版调用入口 */
+    fun start(url: String, userAgent: String? = null, headers: Map<String, String>? = null) {
+        startStandalone(url, userAgent, headers = headers, onStandaloneFailed = null)
+    }
+
     /**
      * 启动独立超前音频探路采集。
+     * @param headers 可选的 HTTP 请求头（如 Referer / Cookie 等）
      * @param onStandaloneFailed 当独立探路因单连接限制等原因建连失败时回调，由控制器无缝回退至主播放器直采
      */
     fun startStandalone(
         url: String,
         userAgent: String? = null,
+        headers: Map<String, String>? = null,
         onStandaloneFailed: (() -> Unit)? = null,
     ) {
         mainHandler.post {
@@ -627,8 +650,18 @@ class AiAudioScout(
                     .setBufferDurationsMs(1200, 8000, 400, 800)
                     .build()
 
+                val effectiveUa = headers?.get("User-Agent")?.takeIf { it.isNotBlank() }
+                    ?: userAgent?.takeIf { it.isNotBlank() }
+                    ?: DEFAULT_UA
+
                 val dataSourceFactory = OkHttpDataSource.Factory(okHttpClient).apply {
-                    setUserAgent(userAgent?.takeIf { it.isNotBlank() } ?: DEFAULT_UA)
+                    setUserAgent(effectiveUa)
+                    if (!headers.isNullOrEmpty()) {
+                        val cleanHeaders = headers.filterKeys { !it.equals("User-Agent", ignoreCase = true) }
+                        if (cleanHeaders.isNotEmpty()) {
+                            setDefaultRequestProperties(cleanHeaders)
+                        }
+                    }
                 }
 
                 val player = ExoPlayer.Builder(context, renderersFactory)

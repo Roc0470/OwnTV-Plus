@@ -40,6 +40,29 @@ playlist (URL or a local file) or **Stalker/Ministra** portal.
 Open source, GPLv3, original code, built with the help of AI. **Android TV only** — leanback
 launcher, D-pad first.
 
+---
+
+## 🚀 OwnTV+ (Plus Edition) 功能更新说明 (v5.3.0-ai)
+
+**OwnTV+ (`OwnTV-Plus`)** 在原版 OwnTV 基础上深度集成了 **AI 实时同传双语字幕系统（AI Live Subtitle）**，专为跨语种电视直播打造：
+
+### 🧠 1. 大段完整长字幕模式（Paragraph Semantic Unit）
+- **流式语义累积**：告别碎片化短句闪烁与排队滞后，支持将连续语音智能合并为 **22~42 字的大段完整语义长句**，同一张字幕卡片内逐字平滑延伸，达到句末强标点或长停顿后自动翻篇。
+- **自适应三行排版**：长字幕容器放宽至 `1220.dp`，原文与译文均支持最多 **3 行折行**；当译文超过 26 字时自动微调字号缩放（`90%`），兼顾远距离阅读清晰度与画面不遮挡。
+- **从容阅读驻留与防闪烁消隐**：长句保底驻留时长提升至 **4.5 秒**（下一段长句满 8 字时支持 2.8 秒平滑让位），静音防闪烁消隐时间延长至 **10.0 秒**。
+
+### ⏱️ 2. 双模式音频探路与毫秒级 PTS 音画同步
+- **三种音频采集策略一键切换**：
+  - **智能自适应 (Auto)**：自动识别直播源连接限制，支持多连接时优先启用后台超前探路，遇到单连接防踢源自动无缝降级为直采模式。
+  - **强制延迟探路 (Standalone Lead Scout)**：后台独立超前拉流解码音频（默认 5 秒前置缓冲），建立 **60 秒环形音频 PTS 时间轴**，彻底抵消大模型网络推理耗时，实现主播开口即出字幕。
+  - **单连接直采保活 (Direct Tap Mode)**：通过 `TapForwardingAudioSink` 挂载主播放器 `AudioSink` 旁路零拷贝提取 16kHz PCM，**0 额外网络连接、0 解码器冲突**，彻底杜绝单连接 IPTV 源踢线或封号，且彻底解决无声/静音帧导致的 WebSocket 断流问题。
+- **缓冲卡顿时钟冻结与追帧重同步**：主画面缓冲卡顿时自动冻结字幕时钟（屏幕字幕不抢跑、不消失），恢复播放后自动对齐最新语音窗口。
+- **双向时序校准（`-10.0s` ~ `+15.0s`）**：播放界面支持通过遥控器方向键或设置面板按 `±0.5s` / `±2.0s` 实时微调字幕快慢，并支持**“立即对齐当前语音”**一键复位。
+
+### 🌐 3. 多模型同传引擎与手机扫码 Web 控制台
+- **内置主流同传预设**：支持阿里云百炼 `qwen3.8-livetranslate-flash-realtime`（推荐，WebSocket 毫秒级流式同传）、智谱 GLM、Google Gemini、OpenAI Realtime / Whisper 以及 TVGO 引擎。
+- **局域网手机扫码配置（`http://<TV_IP>:8964`）**：无需用电视遥控器繁琐输入 API Key，手机扫码即可在网页端一键切换供应商预设、粘贴 API Key、调节字幕位置/字号/背景透明度与时序偏移，配置实时同步上屏。
+
 > ### 📖 New here? **[User Guide →](extras/USER_GUIDE.md)**
 > Every feature, where to find it, and the remote shortcuts — on one page.
 

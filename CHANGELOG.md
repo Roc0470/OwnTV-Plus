@@ -7,6 +7,21 @@
 > Issue numbers that are part of a title are fine; explanatory parentheticals are not. The detail —
 > what, why, files and verification — belongs in the commit message, never here.
 
+## v5.3.0-ai — 2026-11-15
+
+### ✨ New features
+- **🧠 AI Live Subtitle: paragraph-level long subtitle streaming mode (22–42 chars, up to 3 lines) with adaptive font scaling**
+- **⏱️ AI Live Subtitle: 60-second audio PTS timeline synchronization, buffering clock freeze and -10s to +15s sync offset calibration**
+- **🔌 AI Live Subtitle: three capture modes — Auto Adaptive, Standalone Lead Scout (5s delayed live) and Direct Tap (single-connection anti-kick)**
+- **📱 AI Live Subtitle: built-in LAN Web configuration server (`:8964`) with QR code scanning for instant API Key and layout setup**
+- **🌐 AI Live Subtitle: presets for Alibaba Bailian (`qwen3.8-livetranslate-flash-realtime`), OpenAI Realtime, Gemini, Zhipu GLM and TVGO**
+
+### 🐛 Fixes
+- **🔊 AI Live Subtitle: bypass PCM tap on `LivePreviewEngine` (`TapForwardingAudioSink`) prevents stream interruption after 5–6 seconds**
+- **🔄 AI Live Subtitle: decouple server VAD events from translation output and add 45-second seamless WebSocket session refresh**
+- **⏸️ AI Live Subtitle: hold main player paused during channel switch preparation in standalone scout mode to prevent lead lag**
+- **🌐 AI Live Subtitle: inherit custom streaming HTTP client and headers (`User-Agent` / `Referer`) in standalone audio scout**
+
 ## v5.2.2 — 2026-11-09
 
 ### ✨ New features

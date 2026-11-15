@@ -146,11 +146,43 @@ enum class AiProviderPreset(
 }
 
 /**
+ * 音频采集与探路工作模式。
+ */
+enum class AiSubtitleCaptureMode(
+    val id: String,
+    val title: String,
+    val description: String,
+) {
+    AUTO(
+        id = "auto",
+        title = "智能自适应 (推荐)",
+        description = "自动检测单连接源；无限制源优先启用 5 秒延迟直播以精准对齐音画",
+    ),
+    STANDALONE(
+        id = "standalone",
+        title = "强制延迟探路 (音画精准对齐)",
+        description = "始终启用后台探路与前置缓冲，彻底消除 AI 翻译延迟，支持双向毫秒微调",
+    ),
+    DIRECT_TAP(
+        id = "direct_tap",
+        title = "单连接直采保活 (防踢/防封号)",
+        description = "零额外连接直接监听主画面，绝不触发单连接源踢线封号；字幕受网络推理延迟约 1.5 秒",
+    );
+
+    companion object {
+        fun fromId(id: String?): AiSubtitleCaptureMode =
+            entries.firstOrNull { it.id == id } ?: AUTO
+    }
+}
+
+/**
  * AI 实时字幕持久化配置数据模型。
  */
 data class AiSubtitleConfig(
     /** 当前选择的协议提供商 */
     val provider: AiSubtitleProvider = AiSubtitleProvider.OPENAI_COMPAT,
+    /** 音频采集与探路工作模式 */
+    val captureMode: AiSubtitleCaptureMode = AiSubtitleCaptureMode.AUTO,
     /** API 基础地址（如 https://.../v1 或 wss://.../realtime） */
     val apiBaseUrl: String = AiSubtitleProvider.OPENAI_COMPAT.defaultBaseUrl,
     /** API 密钥 (Bearer Token / API Key) */
@@ -179,6 +211,8 @@ data class AiSubtitleConfig(
     val verticalOffsetDp: Int = 0,
     /** 渲染视觉风格（电视半透明卡片 / 电影透亮无框） */
     val renderStyle: SubtitleRenderStyle = SubtitleRenderStyle.TRANSLUCENT_CARD,
+    /** 卡片背景不透明度 (0.3f ~ 0.95f，默认 0.72f) */
+    val bgAlpha: Float = 0.72f,
     /** 字幕时序快慢微调偏移量（毫秒，-10000ms ~ +15000ms，默认 0ms；负数表示字幕提前，正数表示字幕延后，单次播放会话级生效） */
     val syncOffsetMs: Int = 0,
     /** 设备唯一标识（用于 tvgo 协议握手） */
@@ -221,8 +255,10 @@ class AiSubtitleConfigStore(context: Context) {
             prefs.edit().putString(KEY_DEVICE_ID, devId).apply()
         }
         val provider = AiSubtitleProvider.fromId(prefs.getString(KEY_PROVIDER, null))
+        val captureMode = AiSubtitleCaptureMode.fromId(prefs.getString(KEY_CAPTURE_MODE, null))
         return AiSubtitleConfig(
             provider = provider,
+            captureMode = captureMode,
             apiBaseUrl = prefs.getString(KEY_BASE_URL, null) ?: provider.defaultBaseUrl,
             apiKey = prefs.getString(KEY_API_KEY, null).orEmpty(),
             modelName = prefs.getString(KEY_MODEL, null) ?: provider.defaultModel,
@@ -254,6 +290,7 @@ class AiSubtitleConfigStore(context: Context) {
         }
         prefs.edit()
             .putString(KEY_PROVIDER, next.provider.id)
+            .putString(KEY_CAPTURE_MODE, next.captureMode.id)
             .putString(KEY_BASE_URL, next.apiBaseUrl.trim())
             .putString(KEY_API_KEY, next.apiKey.trim())
             .putString(KEY_MODEL, next.modelName.trim())
@@ -305,6 +342,7 @@ class AiSubtitleConfigStore(context: Context) {
     companion object {
         private const val PREFS_NAME = "owntv_ai_subtitle_prefs"
         private const val KEY_PROVIDER = "provider"
+        private const val KEY_CAPTURE_MODE = "capture_mode"
         private const val KEY_BASE_URL = "api_base_url"
         private const val KEY_API_KEY = "api_key"
         private const val KEY_MODEL = "model_name"

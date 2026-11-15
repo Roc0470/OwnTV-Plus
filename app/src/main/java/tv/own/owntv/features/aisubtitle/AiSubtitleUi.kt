@@ -3,6 +3,7 @@ package tv.own.owntv.features.aisubtitle
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -91,7 +92,6 @@ fun AiSubtitleOverlay(
     if (state is AiSubtitleState.Off) return
 
     val uiFontCompensation = 1f / LocalUiFontScaleFactor.current
-    val scale = config.fontSizeScale * sizeScale * uiFontCompensation
 
     Box(
         modifier = modifier
@@ -180,9 +180,9 @@ fun AiSubtitleOverlay(
             else -> Unit
         }
 
-        // 2. 实时双语/中文翻译短句子渲染（支持顶部/新闻抬高/底部自适应，及半透明卡片/电影透亮无框风格）
-        val active = cue
-        if (active != null && (active.translatedText.isNotBlank() || active.originalText.isNotBlank())) {
+        // 2. 实时双语大段长字幕渲染（流式累积 + 宽松排版 + 自适应字号）
+        val currentCue = cue
+        if (currentCue != null && (currentCue.translatedText.isNotBlank() || currentCue.originalText.isNotBlank())) {
             val isTop = config.positionPreset == SubtitlePositionPreset.TOP
             val baseOffset = config.positionPreset.baseOffsetDp
             val totalOffsetDp = baseOffset + config.verticalOffsetDp
@@ -197,66 +197,59 @@ fun AiSubtitleOverlay(
                     .padding(bottom = (26 + totalOffsetDp).coerceAtLeast(8).dp * sizeScale)
             }
 
-            val isCinema = config.renderStyle == SubtitleRenderStyle.CINEMA_TRANSPARENT
-            val containerModifier = if (isCinema) {
-                alignModifier
-                    .widthIn(max = 1180.dp * sizeScale)
-                    .padding(horizontal = 14.dp * sizeScale, vertical = 4.dp * sizeScale)
-            } else {
-                alignModifier
-                    .widthIn(max = 1080.dp * sizeScale)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color.Black.copy(alpha = 0.72f))
-                    .padding(horizontal = 22.dp * sizeScale, vertical = 9.dp * sizeScale)
-            }
-
-            val textShadow = if (isCinema) {
-                Shadow(color = Color.Black.copy(alpha = 0.98f), offset = Offset(0f, 2.5f), blurRadius = 8f)
-            } else {
-                Shadow(color = Color.Black, offset = Offset(0f, 2f), blurRadius = 6f)
-            }
-            val origShadow = if (isCinema) {
-                Shadow(color = Color.Black.copy(alpha = 0.95f), offset = Offset(0f, 2f), blurRadius = 6f)
-            } else {
-                Shadow(color = Color.Black, offset = Offset(0f, 1.5f), blurRadius = 4f)
-            }
+            // 长句自适应字号微调：当译文超过 26 字时适度缩减至 90%，保证 3 行内优雅容纳
+            val lengthFactor = if (currentCue.translatedText.length > 26) 0.90f else 1.0f
+            val effectiveScale = config.fontSizeScale * lengthFactor * sizeScale * uiFontCompensation
+            val translatedSizeSp = (24f * effectiveScale).sp
+            val translatedLineHeightSp = (31f * effectiveScale).sp
+            val originalSizeSp = (15f * effectiveScale).sp
+            val originalLineHeightSp = (20f * effectiveScale).sp
 
             Column(
-                modifier = containerModifier,
+                modifier = alignModifier
+                    .padding(horizontal = 44.dp)
+                    .widthIn(max = 1220.dp)
+                    .background(
+                        color = Color.Black.copy(alpha = config.bgAlpha.coerceIn(0.3f, 0.95f)),
+                        shape = RoundedCornerShape(12.dp),
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(12.dp),
+                    )
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                if (config.showOriginal && active.originalText.isNotBlank()) {
+                if (config.showOriginal && currentCue.originalText.isNotBlank()) {
                     Text(
-                        text = active.originalText,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                        text = currentCue.originalText,
+                        color = Color(0xFFD0D7DE),
+                        fontSize = originalSizeSp,
+                        lineHeight = originalLineHeightSp,
                         textAlign = TextAlign.Center,
-                        style = TextStyle(
-                            color = if (isCinema) Color(0xFF5EEAD4) else Color(0xFF99F6E4),
-                            fontSize = (17.5f * scale).sp,
-                            lineHeight = (22f * scale).sp,
-                            fontFamily = FontFamily.SansSerif,
-                            fontWeight = if (isCinema) FontWeight.Medium else FontWeight.Normal,
-                            shadow = origShadow,
-                        ),
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    if (active.translatedText.isNotBlank()) {
-                        Spacer(Modifier.height(3.dp * sizeScale))
+                    if (currentCue.translatedText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(5.dp))
                     }
                 }
-                if (active.translatedText.isNotBlank()) {
+                if (currentCue.translatedText.isNotBlank()) {
                     Text(
-                        text = active.translatedText,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                        text = currentCue.translatedText,
+                        color = Color(0xFFFFF8DC),
+                        fontSize = translatedSizeSp,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = translatedLineHeightSp,
                         textAlign = TextAlign.Center,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
                         style = TextStyle(
-                            color = Color.White,
-                            fontSize = (24f * scale).sp,
-                            lineHeight = (30f * scale).sp,
-                            fontFamily = FontFamily.SansSerif,
-                            fontWeight = if (isCinema) FontWeight.Bold else FontWeight.SemiBold,
-                            shadow = textShadow,
+                            shadow = Shadow(
+                                color = Color.Black,
+                                blurRadius = 6f,
+                            ),
                         ),
                     )
                 }
@@ -281,6 +274,7 @@ fun AiSubtitleOverlay(
 fun AiSubtitleSettingsDialog(
     player: PlaybackEngine,
     fallbackStreamUrl: String? = null,
+    headers: Map<String, String>? = null,
     onDismiss: () -> Unit,
     controller: AiSubtitleController = koinInject(),
 ) {
@@ -358,7 +352,7 @@ fun AiSubtitleSettingsDialog(
                         if (!config.isConfigured && !isRunning) {
                             showQrPanel = true
                         } else {
-                            controller.toggle(player, fallbackStreamUrl = fallbackStreamUrl)
+                            controller.toggle(player, fallbackStreamUrl = fallbackStreamUrl, headers = headers)
                         }
                     },
                 )
@@ -477,8 +471,27 @@ fun AiSubtitleSettingsDialog(
             }
 
             // 4. 延迟直播与双语参数
+            // 4. 音频采集模式 (防踢线/单连接) 与延迟直播
             item {
-                StagePopupLabel("延迟直播对齐与语言设置", Modifier.padding(top = 10.mpx))
+                StagePopupLabel("音频采集与防封模式 (解决单连接限制/防踢线)", Modifier.padding(top = 10.mpx))
+            }
+
+            items(AiSubtitleCaptureMode.entries.size) { index ->
+                val mode = AiSubtitleCaptureMode.entries[index]
+                val selected = config.captureMode == mode
+                StagePopupOption(
+                    title = mode.title,
+                    subtitle = mode.description,
+                    chosen = selected,
+                    leading = { focused -> StagePopupRadio(selected, focused) },
+                    onClick = {
+                        controller.configStore.update { it.copy(captureMode = mode) }
+                    },
+                )
+            }
+
+            item {
+                StagePopupLabel("延迟直播对齐与时序微调", Modifier.padding(top = 10.mpx))
             }
 
             item {
@@ -506,9 +519,14 @@ fun AiSubtitleSettingsDialog(
                     config.syncOffsetMs < 0 -> "${String.format(java.util.Locale.US, "%.1f", offsetSec)}s (字幕提前)"
                     else -> "0.0s (正常对齐)"
                 }
+                val timingSubtitle = if (controller.isDirectTapMode) {
+                    "当前处于直采保活模式（主画面无延迟），无法提前未出结果的译文；可按 ▶ 延后字幕"
+                } else {
+                    "遥控器 ◀ 字幕提前 0.5s (防慢)，▶ 字幕延后 0.5s (防抢跑)，按 OK 键重置 0.0s"
+                }
                 AiStepperRow(
                     title = "字幕时序快慢微调 (-10s ~ +15s)",
-                    subtitle = "遥控器 ◀ 字幕提前 0.5s (防慢)，▶ 字幕延后 0.5s (防抢跑)，按 OK 键重置 0.0s",
+                    subtitle = timingSubtitle,
                     valueText = offsetLabel,
                     onLeft = {
                         controller.adjustSyncOffset(-AiSubtitleConfigStore.STEP_SYNC_OFFSET_MS)

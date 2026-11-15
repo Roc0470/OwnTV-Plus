@@ -1662,10 +1662,13 @@ fun OwnTVShell(
                 val aiSubController = koinInject<tv.own.owntv.features.aisubtitle.AiSubtitleController>()
                 val activePlaybackEngine = if (liveOnExo) liveVm.previewEngine else mpvEngine
                 val currentChannelUrl = previewChannel?.streamUrl ?: player.currentMediaUrl
+                val channelHeaders = previewChannel?.httpHeaders?.let {
+                    tv.own.owntv.core.network.StreamHeaders.decode(it)
+                }
                 val aiConfig by aiSubController.configStore.config.collectAsStateWithLifecycle()
                 LaunchedEffect(currentChannelUrl, isFull, aiConfig.autoStart) {
                     if ((aiSubController.isEnabled || aiConfig.autoStart) && currentChannelUrl != null) {
-                        aiSubController.start(activePlaybackEngine, currentChannelUrl)
+                        aiSubController.start(activePlaybackEngine, currentChannelUrl, headers = channelHeaders)
                     }
                 }
                 DisposableEffect(Unit) {
@@ -1752,6 +1755,7 @@ fun OwnTVShell(
                 PlayerHud(
                     player = if (liveOnExo) liveVm.previewEngine else mpvEngine, // HUD drives the active engine
                     streamUrl = previewChannel?.streamUrl ?: player.currentMediaUrl,
+                    headers = previewChannel?.httpHeaders?.let { tv.own.owntv.core.network.StreamHeaders.decode(it) },
                     onBack = exitPlayer,
                     onPip = dockPlayer, // PiP/dock works for live on either engine now
                     onAudioMode = toAudioMode,
